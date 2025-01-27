@@ -121,7 +121,7 @@ namespace TiltBrush
         [Header("Video Processing")]
         [SerializeField] private TextMeshPro m_VideoRecordTimer;
         [SerializeField] private GameObject m_VideoSavingRoot;
-        [SerializeField] private string m_VideoSavingText = "Loading Video...";
+        [SerializeField] private string m_VideoSavingText = "Finalizing Video...";
         [SerializeField] private string m_VideoPlaybackText = "Video Preview";
         [SerializeField] private string m_VideoPreviewToolText;
         [SerializeField] private string m_VideoReadyToolText;
@@ -2098,22 +2098,18 @@ namespace TiltBrush
             {
                 return;
             }
-            // Limit shipping version to a single gif preset
-            if (Config.IsExperimental)
+            m_iGifPreset = (m_iGifPreset + i + m_AutoGifPresets.Length) % m_AutoGifPresets.Length;
+
+            var preset = m_AutoGifPresets[m_iGifPreset];
+
+            // Apply the preset
+            var text = m_Cameras[1].m_OffsetTransform.Find("Text");
+            if (text != null)
             {
-                m_iGifPreset = (m_iGifPreset + i + m_AutoGifPresets.Length) % m_AutoGifPresets.Length;
-
-                var preset = m_AutoGifPresets[m_iGifPreset];
-
-                // Apply the preset
-                var text = m_Cameras[1].m_OffsetTransform.Find("Text");
-                if (text != null)
+                var tmpro = text.GetComponent<TMPro.TextMeshPro>();
+                if (tmpro != null)
                 {
-                    var tmpro = text.GetComponent<TMPro.TextMeshPro>();
-                    if (tmpro != null)
-                    {
-                        tmpro.text = preset.name;
-                    }
+                    tmpro.text = preset.name;
                 }
             }
         }

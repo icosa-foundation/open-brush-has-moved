@@ -16,8 +16,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using UnityEngine;
 using Newtonsoft.Json;
+using ICSharpCode.SharpZipLib.Zip;
+using static TiltBrush.SketchWriter;
 
 namespace TiltBrush
 {
@@ -66,6 +69,25 @@ namespace TiltBrush
             timeslicedConstructor = TimeslicedConstructor();
         }
 
+        public static void ExportMetadata(string path)
+        {
+            var instance = new SketchSnapshot();
+            using (var jsonWriter = new CustomJsonWriter(new StreamWriter(new FileStream(path, FileMode.Create))))
+            {
+                instance.m_JsonSerializer.Serialize(jsonWriter, instance.m_Metadata);
+            }
+        }
+
+        // Initialize just enough to generate metadata JSON for export
+        public SketchSnapshot()
+        {
+            m_JsonSerializer = new JsonSerializer();
+            m_JsonSerializer.ContractResolver = new CustomJsonContractResolver();
+            m_SaveIconCapture = null;
+            m_GroupIdMapping = new GroupIdMapping();
+            m_Metadata = GetSketchMetadata();
+        }
+
         private IEnumerator<Timeslice> TimeslicedConstructor()
         {
             System.Diagnostics.Stopwatch stopwatch = new System.Diagnostics.Stopwatch();
@@ -87,13 +109,18 @@ namespace TiltBrush
             }
             stopwatch.Stop();
 
+            m_Metadata = GetSketchMetadata();
+        }
+
+        public SketchMetadata GetSketchMetadata()
+        {
             // Note: This assumes Room space == Global space.
             TrTransform xfThumbnail_RS = SketchControlsScript.m_Instance.GetSaveIconTool()
                 .LastSaveCameraRigState.GetLossyTrTransform();
 
             bool hasAuthor = !string.IsNullOrEmpty(App.UserConfig.User.Author);
 
-            m_Metadata = new SketchMetadata
+            return new SketchMetadata
             {
                 //      BrushIndex = brushGuids.ToArray(), // Need to do this on actual save!
                 EnvironmentPreset = SceneSettings.m_Instance.GetDesiredPreset().m_Guid.ToString("D"),
@@ -101,6 +128,7 @@ namespace TiltBrush
                 ThumbnailCameraTransformInRoomSpace = xfThumbnail_RS,
                 Authors = hasAuthor ? new[] { App.UserConfig.User.Author } : null,
                 ModelIndex = MetadataUtils.GetTiltModels(m_GroupIdMapping),
+                LightIndex = MetadataUtils.GetTiltLights(m_GroupIdMapping),
                 ImageIndex = MetadataUtils.GetTiltImages(m_GroupIdMapping),
                 Videos = MetadataUtils.GetTiltVideos(m_GroupIdMapping),
                 Mirror = PointerManager.m_Instance.SymmetryWidgetToMirror(),
@@ -184,6 +212,53 @@ namespace TiltBrush
             }
             return brush.m_Guid;
         }
+
+        public string WriteSnapshotToStream(Stream outputStream)
+        {
+            try
+            {
+                using (var zip = new ZipOutputStream(outputStream))
+                {
+                    zip.SetLevel(9); // Set compression level
+
+                    // Write metadata
+                    zip.PutNextEntry(new ZipEntry(TiltFile.FN_METADATA));
+                    using (var writer = new StreamWriter(zip, Encoding.UTF8, 1024, true))
+                    {
+                        m_JsonSerializer.Serialize(writer, m_Metadata);
+                    }
+                    zip.CloseEntry();
+
+                    // Prepare the necessary data for WriteMemory
+                    List<Stroke> strokes = new List<Stroke>(SketchMemoryScript.m_Instance.GetMemoryList);
+                    IList<AdjustedMemoryBrushStroke> strokeCopies = EnumerateAdjustedSnapshots(strokes).ToList();
+                    GroupIdMapping groupIdMapping = new GroupIdMapping();
+                    List<Guid> brushList;
+
+                    // Write sketch data
+                    zip.PutNextEntry(new ZipEntry(TiltFile.FN_SKETCH));
+                    WriteMemory(zip, strokeCopies, groupIdMapping, out brushList);
+                    zip.CloseEntry();
+
+                    // Write thumbnail if available
+                    if (Thumbnail != null)
+                    {
+                        zip.PutNextEntry(new ZipEntry(TiltFile.FN_THUMBNAIL));
+                        zip.Write(Thumbnail, 0, Thumbnail.Length);
+                        zip.CloseEntry();
+                    }
+
+                    // Add other necessary files as needed
+                }
+
+                return null; // No error
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
+            }
+        }
+
 
         /// Returns null on successful completion. If IO or UnauthorizedAccess exceptions are thrown,
         /// returns their messages. Should not normally raise exceptions.

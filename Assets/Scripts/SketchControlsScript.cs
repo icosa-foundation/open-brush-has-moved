@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using OpenBrush.Multiplayer;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using TiltBrush.Layers;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using SymmetryMode = TiltBrush.PointerManager.SymmetryMode;
@@ -55,7 +57,7 @@ namespace TiltBrush
             ResetAllPanels,
             SketchOrigin,
             SymmetryPlane,
-            SymmetryFour,
+            MultiMirror,
             ViewOnly,
             SaveGallery,
             LightingLdr,
@@ -142,13 +144,35 @@ namespace TiltBrush
             SignOutConfirm,
             ReadOnlyNotice,
             ShowContribution,
+            WhatIsNew,
+
+            // Open Brush Reserved Enums 1000-1999
+            LanguagePopup = 1000,
+            MultiplayerTogglePanel = 1001,
+            MultiplayerPanelOptions = 1002, // iParam1: Popup options
+            MultiplayerJoinRoom = 1004,
+            EditMultiplayerRoomName = 1005,
+            MultiplayerLeaveRoom = 1006,
+            MultiplayerConnect = 1007,
+            MultiplayerDisconnect = 1008,
+            EditMultiplayerNickName = 1009,
+            DisplaySynchInfo = 1010,
+            SynchInfoPercentageUpdate = 1011,
+            HideSynchInfo = 1012,
+
+            RenameSketch = 5200,
+            OpenLayerOptionsPopup = 5201,
+            RenameLayer = 5202,
+            OpenDirectorChooserPopup = 5800,
             OpenScriptsCommandsList = 6000,
             OpenScriptsList = 6001,
             OpenExampleScriptsList = 6002,
             SymmetryTwoHanded = 6003,
             OpenColorOptionsPopup = 7000,
             ChangeSnapAngle = 8000,
-            MergeBrushStrokes = 10000
+            MergeBrushStrokes = 10000,
+            RepaintOptions = 11500,
+            OpenNumericInputPopup = 12000
         }
 
         public enum ControlsType
@@ -341,6 +365,8 @@ namespace TiltBrush
         [SerializeField] int m_NumStrokesForSaveIcon = 50;
 
         [NonSerialized] public Color m_GrabHighlightActiveColor;
+        [NonSerialized] public bool m_DisableWorldGrabbing = false;
+
         /// Throwing an object faster than this means it's a "toss". Units are m/s.
         public float m_TossThresholdMeters = 3f;
         /// Angular motion contributes more towards the toss velocity the larger the object is;
@@ -769,6 +795,7 @@ namespace TiltBrush
         {
             get { return GetComponent<IconTextureAtlas>(); }
         }
+        public GrabWidget CurrentGrabWidget => m_CurrentGrabWidget;
 
         void DismissPopupOnCurrentGazeObject(bool force)
         {
@@ -915,11 +942,8 @@ namespace TiltBrush
             m_CurrentGazeObject = -1;
             m_EatInputGazeObject = false;
 
+            // Previously set to 0 in experimental builds
             int hidePanelsDelay = 1;
-            if (Config.IsExperimental)
-            {
-                hidePanelsDelay = 0;
-            }
 
             StartCoroutine(DelayedHidePanels(hidePanelsDelay));
 
@@ -928,6 +952,8 @@ namespace TiltBrush
             m_GrabWidgetState = GrabWidgetState.None;
 
             UpdateDraftingVisibility();
+
+            m_DisableWorldGrabbing = false;
         }
 
         private IEnumerator<Timeslice> DelayedHidePanels(int frames)
@@ -974,8 +1000,8 @@ namespace TiltBrush
             m_SketchSurfacePanel.m_UpdatedToolThisFrame = false;
 
             // Verify controllers are available and prune state if they're not.
-            if (App.VrSdk.GetControllerDof() == VrSdk.DoF.Six &&
-                App.VrSdk.IsInitializingUnityXR)
+            if ((App.VrSdk.GetControllerDof() == VrSdk.DoF.Six &&
+                App.VrSdk.IsInitializingUnityXR) && App.VrSdk.IsHmdInitialized())
             {
                 m_PanelManager.SetVisible(false);
                 PointerManager.m_Instance.RequestPointerRendering(false);
@@ -1261,8 +1287,7 @@ namespace TiltBrush
                 && !InputManager.m_Instance.GetCommand(InputManager.SketchCommands.Activate)
                 && m_GrabBrush.grabbingWorld == false
                 && m_CurrentGazeObject == -1 // free up swipe for use by gaze object
-                && (m_ControlsType != ControlsType.SixDofControllers || InputManager.Brush.IsTrackedObjectValid)
-                // TODO:Mike - very hacky
+                && (m_ControlsType != ControlsType.SixDofControllers || InputManager.Brush.IsTrackedObjectValid) // TODO:Mikesky - very hacky
                 && SketchSurfacePanel.m_Instance.ActiveTool.m_Type != BaseTool.ToolType.MultiCamTool;
 
             if (m_EatToolScaleInput)
@@ -1319,18 +1344,13 @@ namespace TiltBrush
         {
             UnityEngine.Profiling.Profiler.BeginSample("SketchControlScript.UpdateStandardInput");
             //debug keys
-            if (Config.IsExperimental)
+            if (App.UserConfig.Flags.AdvancedKeyboardShortcuts)
             {
                 var camTool = SketchSurfacePanel.m_Instance.ActiveTool as MultiCamTool;
 
                 if (InputManager.m_Instance.GetKeyboardShortcutDown(InputManager.KeyboardShortcut.SaveNew))
                 {
                     IssueGlobalCommand(GlobalCommands.SaveNew, 1);
-                }
-                else if (InputManager.m_Instance.GetKeyboardShortcutDown(
-                    InputManager.KeyboardShortcut.ExportAll))
-                {
-                    IssueGlobalCommand(GlobalCommands.ExportAll);
                 }
                 else if (InputManager.m_Instance.GetKeyboardShortcutDown(
                     InputManager.KeyboardShortcut.SwitchCamera) && camTool != null)
@@ -1363,8 +1383,8 @@ namespace TiltBrush
                     var cur = PointerManager.m_Instance.CurrentSymmetryMode;
                     var next = (cur == SymmetryMode.None) ? SymmetryMode.SinglePlane
                         : (cur == SymmetryMode.SinglePlane) ? SymmetryMode.DebugMultiple
-                        : (cur == SymmetryMode.DebugMultiple) ? SymmetryMode.FourAroundY
-                        : (cur == SymmetryMode.FourAroundY) ? SymmetryMode.TwoHanded
+                        : (cur == SymmetryMode.DebugMultiple) ? SymmetryMode.MultiMirror
+                        : (cur == SymmetryMode.MultiMirror) ? SymmetryMode.TwoHanded
                         : SymmetryMode.None;
                     PointerManager.m_Instance.CurrentSymmetryMode = next;
                 }
@@ -1449,6 +1469,11 @@ namespace TiltBrush
                 {
                     App.Instance.SetDesiredState(App.AppState.LoadingBrushesAndLighting);
                 }
+                else if (InputManager.m_Instance.GetKeyboardShortcutDown(
+                             InputManager.KeyboardShortcut.FlyMode))
+                {
+                    SketchSurfacePanel.m_Instance.EnableSpecificTool(BaseTool.ToolType.FlyTool);
+                }
                 else if (App.Config.m_ToggleProfileOnAppButton &&
                     (InputManager.Wand.GetVrInputDown(VrInput.Button03) ||
                     InputManager.m_Instance.GetKeyboardShortcutDown(
@@ -1478,9 +1503,7 @@ namespace TiltBrush
             if (!m_PanelManager.AdvancedModeActive() &&
                 InputManager.m_Instance.GetCommandDown(InputManager.SketchCommands.ToggleDefaultTool) &&
                 !m_SketchSurfacePanel.IsDefaultToolEnabled() &&
-                m_SketchSurfacePanel.ActiveTool.AllowDefaultToolToggle() &&
-                // don't allow tool to change while pointing at panel because there is no visual indication
-                m_CurrentGazeObject == -1)
+                m_SketchSurfacePanel.ActiveTool.AllowDefaultToolToggle() && m_CurrentGazeObject == -1)// don't allow tool to change while pointing at panel because there is no visual indication
             {
                 m_SketchSurfacePanel.EnableDefaultTool();
                 AudioManager.m_Instance.PlayPinCushionSound(true);
@@ -1591,7 +1614,8 @@ namespace TiltBrush
                 m_PanelManager.GazePanelsAreVisible() &&
                 !m_GrabWand.grabbingWorld &&
                 !InputManager.m_Instance.GetCommand(InputManager.SketchCommands.Activate) &&
-                !SelectionManager.m_Instance.IsAnimatingTossFromGrabbingGroup;
+                !SelectionManager.m_Instance.IsAnimatingTossFromGrabbingGroup &&
+                !(MultiplayerManager.m_Instance.State == ConnectionState.IN_ROOM);
         }
 
         bool CanRedo()
@@ -1601,7 +1625,8 @@ namespace TiltBrush
                 m_PanelManager.GazePanelsAreVisible() &&
                 !m_GrabBrush.grabbingWorld &&
                 !InputManager.m_Instance.GetCommand(InputManager.SketchCommands.Activate) &&
-                !SelectionManager.m_Instance.IsAnimatingTossFromGrabbingGroup;
+                !SelectionManager.m_Instance.IsAnimatingTossFromGrabbingGroup &&
+                !(MultiplayerManager.m_Instance.State == ConnectionState.IN_ROOM);
         }
 
         bool ShouldRepeatUndo()
@@ -2337,10 +2362,16 @@ namespace TiltBrush
             GrabWidgetData best = null;
             for (int i = 0; i < candidates.Count; ++i)
             {
-                if (candidates[i].m_NearController &&
-                    (best == null || candidates[i].m_ControllerScore > best.m_ControllerScore))
+                var candidate = candidates[i];
+                if (!candidate.m_NearController) continue;
+
+                // For media widgets - only select from the active layer
+                if (candidate.m_WidgetScript is MediaWidget
+                    && candidate.m_WidgetScript.Canvas != App.Scene.ActiveCanvas) continue;
+
+                if (best == null || candidate.m_ControllerScore > best.m_ControllerScore)
                 {
-                    best = candidates[i];
+                    best = candidate;
                 }
             }
             return best;
@@ -2435,7 +2466,8 @@ namespace TiltBrush
             bool bAllowWorldTransform = m_SketchSurfacePanel.ActiveTool.AllowWorldTransformation() &&
                 (m_GrabWorldState != GrabWorldState.ResetDone) &&
                 (!PointerManager.m_Instance.IsMainPointerCreatingStroke() || App.Instance.IsLoading()) &&
-                App.Instance.IsInStateThatAllowsAnyGrabbing();
+                App.Instance.IsInStateThatAllowsAnyGrabbing() &&
+                !m_DisableWorldGrabbing;
 
             bool bWorldGrabWandPrev = m_GrabWand.grabbingWorld;
             bool bWorldGrabBrushPrev = m_GrabBrush.grabbingWorld;
@@ -3724,7 +3756,7 @@ namespace TiltBrush
         }
 
         /// Reset the scene or the canvas, depending on the current mode
-        void ResetGrabbedPose(bool everything = false)
+        public void ResetGrabbedPose(bool everything = false)
         {
             //update sketch surface position with offset to sweet spot
             m_SketchSurface.transform.position = m_PanelManager.GetSketchSurfaceResetPos();
@@ -3946,27 +3978,23 @@ namespace TiltBrush
         private void SaveModel()
         {
 #if USD_SUPPORTED
-            if (Config.IsExperimental)
-            {
+            var current = SaveLoadScript.m_Instance.SceneFile;
+            string basename = (current.Valid)
+                ? Path.GetFileNameWithoutExtension(current.FullPath)
+                : "Untitled";
+            string directoryName = FileUtils.GenerateNonexistentFilename(
+                App.ModelLibraryPath(), basename, "");
 
-                var current = SaveLoadScript.m_Instance.SceneFile;
-                string basename = (current.Valid)
-                    ? Path.GetFileNameWithoutExtension(current.FullPath)
-                    : "Untitled";
-                string directoryName = FileUtils.GenerateNonexistentFilename(
-                    App.ModelLibraryPath(), basename, "");
-
-                string usdname = Path.Combine(directoryName, basename + ".usd");
-                // TODO: export selection only, though this is still only experimental. The blocking
-                // issue to implement this is that the export collector needs to expose this as an option.
-                //
-                // SelectionManager.m_Instance.HasSelection
-                //    ? SelectionManager.m_Instance.SelectedStrokes
-                //    : null
-                ExportUsd.ExportPayload(usdname);
-                OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                    InputManager.ControllerName.Brush, "Model created!");
-            }
+            string usdname = Path.Combine(directoryName, basename + ".usd");
+            // TODO: export selection only, though this is still only experimental. The blocking
+            // issue to implement this is that the export collector needs to expose this as an option.
+            //
+            // SelectionManager.m_Instance.HasSelection
+            //    ? SelectionManager.m_Instance.SelectedStrokes
+            //    : null
+            ExportUsd.ExportPayload(usdname);
+            OutputWindowScript.m_Instance.CreateInfoCardAtController(
+                InputManager.ControllerName.Brush, "Model created!");
 #endif
         }
 
@@ -4096,7 +4124,7 @@ namespace TiltBrush
             }
         }
 
-        private void LoadSketch(SceneFileInfo fileInfo, bool quickload = false, bool additive = false)
+        public void LoadSketch(SceneFileInfo fileInfo, bool quickload = false, bool additive = false)
         {
             LightsControlScript.m_Instance.DiscoMode = false;
             m_WidgetManager.FollowingPath = false;
@@ -4274,10 +4302,10 @@ namespace TiltBrush
                         ControllerConsoleScript.m_Instance.AddNewLine("Mirror Off");
                     }
                     break;
-                case GlobalCommands.SymmetryFour:
-                    if (PointerManager.m_Instance.CurrentSymmetryMode != SymmetryMode.FourAroundY)
+                case GlobalCommands.MultiMirror:
+                    if (PointerManager.m_Instance.CurrentSymmetryMode != SymmetryMode.MultiMirror)
                     {
-                        PointerManager.m_Instance.SetSymmetryMode(SymmetryMode.FourAroundY);
+                        PointerManager.m_Instance.SetSymmetryMode(SymmetryMode.MultiMirror);
                         ControllerConsoleScript.m_Instance.AddNewLine("Symmetry Enabled");
                     }
                     else
@@ -4374,26 +4402,10 @@ namespace TiltBrush
                     EatGazeObjectInput();
                     break;
                 case GlobalCommands.FAQ:
-                    //launch external window and tell the user we did so
-                    EatGazeObjectInput();
-                    if (!App.Config.IsMobileHardware)
-                    {
-                        OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                            InputManager.ControllerName.Brush,
-                            kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                    }
-                    App.OpenURL(m_HelpCenterURL);
+                    OpenURLAndInformUser(m_HelpCenterURL);
                     break;
                 case GlobalCommands.ReleaseNotes:
-                    //launch external window and tell the user we did so
-                    EatGazeObjectInput();
-                    if (!App.Config.IsMobileHardware)
-                    {
-                        OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                            InputManager.ControllerName.Brush,
-                            kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                    }
-                    App.OpenURL(m_ReleaseNotesURL);
+                    OpenURLAndInformUser(m_ReleaseNotesURL);
                     break;
                 case GlobalCommands.ExportRaw:
                     if (!FileUtils.CheckDiskSpaceWithError(App.UserExportPath()))
@@ -4462,35 +4474,7 @@ namespace TiltBrush
                         break;
                     }
                 case GlobalCommands.About:
-                    EatGazeObjectInput();
-
-                    if (!App.Config.IsMobileHardware)
-                    {
-                        // Launch external window and tell the user we did so/
-                        OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                            InputManager.ControllerName.Brush,
-                            kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                    }
-
-                    // This call is Windows only.
-                    if ((Application.platform == RuntimePlatform.WindowsPlayer) ||
-                        (Application.platform == RuntimePlatform.WindowsEditor))
-                    {
-                        if (!Application.isEditor)
-                        {
-                            System.Diagnostics.Process.Start("notepad.exe",
-                                Path.Combine(App.PlatformPath(), "NOTICE"));
-                        }
-                        else
-                        {
-                            System.Diagnostics.Process.Start("notepad.exe",
-                                Path.Combine(App.SupportPath(), "ThirdParty/GeneratedThirdPartyNotices.txt"));
-                        }
-                    }
-                    else if (App.Config.IsMobileHardware)
-                    {
-                        App.OpenURL(m_ThirdPartyNoticesURL);
-                    }
+                    OpenURLAndInformUser(m_ThirdPartyNoticesURL);
                     break;
                 case GlobalCommands.StencilsDisabled:
                     SketchMemoryScript.m_Instance.PerformAndRecordCommand(new StencilsVisibleCommand());
@@ -4504,17 +4488,48 @@ namespace TiltBrush
                     SketchSurfacePanel.m_Instance.EatToolsInput();
                     break;
                 case GlobalCommands.StraightEdgeShape:
-                    if (Config.IsExperimental)
-                    {
-                        PointerManager.m_Instance.StraightEdgeGuide.SetTempShape(
-                            (StraightEdgeGuideScript.Shape)iParam1);
-                    }
+                    // Previously experimental mode only.
+                    // Untested and currently untriggerable.
+                    PointerManager.m_Instance.StraightEdgeGuide.SetTempShape(
+                        (StraightEdgeGuideScript.Shape)iParam1);
                     break;
                 case GlobalCommands.DeleteSketch:
                     {
                         var sketchSetType = (SketchSetType)iParam2;
                         SketchSet sketchSet = SketchCatalog.m_Instance.GetSet(sketchSetType);
                         sketchSet.DeleteSketch(iParam1);
+                        DismissPopupOnCurrentGazeObject(false);
+                        break;
+                    }
+                case GlobalCommands.RenameSketch:
+                    {
+                        var sketchSetType = (SketchSetType)iParam2;
+                        SketchSet sketchSet = SketchCatalog.m_Instance.GetSet(sketchSetType);
+                        if (sketchSetType == SketchSetType.User)
+                        {
+                            sketchSet.RenameSketch(iParam1, KeyboardPopUpWindow.m_LastInput);
+                        }
+                        DismissPopupOnCurrentGazeObject(false);
+                        break;
+                    }
+                case GlobalCommands.RenameLayer:
+                    {
+                        var layer = App.Scene.GetCanvasByLayerIndex(iParam1);
+                        App.Scene.RenameLayer(layer, KeyboardPopUpWindow.m_LastInput);
+                        DismissPopupOnCurrentGazeObject(false);
+                        break;
+                    }
+                case GlobalCommands.EditMultiplayerRoomName:
+                    {
+                        var panel = (MultiplayerPanel)m_PanelManager.GetActivePanelByType(BasePanel.PanelType.Multiplayer);
+                        panel.RoomName = KeyboardPopUpWindow.m_LastInput;
+                        DismissPopupOnCurrentGazeObject(false);
+                        break;
+                    }
+                case GlobalCommands.EditMultiplayerNickName:
+                    {
+                        var panel = (MultiplayerPanel)m_PanelManager.GetActivePanelByType(BasePanel.PanelType.Multiplayer);
+                        panel.NickName = KeyboardPopUpWindow.m_LastInput;
                         DismissPopupOnCurrentGazeObject(false);
                         break;
                     }
@@ -4554,17 +4569,8 @@ namespace TiltBrush
                         break;
                     }
                 case GlobalCommands.ViewOnlineGallery:
-                    {
-                        if (!App.Config.IsMobileHardware)
-                        {
-                            OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                                InputManager.ControllerName.Brush,
-                                kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                        }
-                        App.OpenURL(kTiltBrushGalleryUrl);
-                        EatGazeObjectInput();
-                        break;
-                    }
+                    OpenURLAndInformUser(kTiltBrushGalleryUrl);
+                    break;
                 case GlobalCommands.CancelUpload:
                     VrAssetService.m_Instance.CancelUpload();
                     break;
@@ -4585,19 +4591,12 @@ namespace TiltBrush
                     }
                     break;
                 case GlobalCommands.ShowGoogleDrive:
-                    EatGazeObjectInput();
-                    if (!App.Config.IsMobileHardware)
-                    {
-                        OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                            InputManager.ControllerName.Brush,
-                            kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                    }
                     string baseDriveUrl = "https://drive.google.com";
                     string driveURL = !App.GoogleIdentity.LoggedIn ? baseDriveUrl :
                         string.Format(
                             "http://accounts.google.com/AccountChooser?Email={0}&continue={1}",
                             App.GoogleIdentity.Profile.email, baseDriveUrl);
-                    App.OpenURL(driveURL);
+                    OpenURLAndInformUser(driveURL);
                     break;
                 case GlobalCommands.GoogleDriveSync:
                     App.DriveSync.SyncEnabled = !App.DriveSync.SyncEnabled;
@@ -4608,6 +4607,13 @@ namespace TiltBrush
                 case GlobalCommands.Duplicate:
                     {
                         int selectedVerts = SelectionManager.m_Instance.NumVertsInSelection;
+
+                        // TODO - this code has never taken imported models etc into account
+                        if (PointerManager.m_Instance.CurrentSymmetryMode == SymmetryMode.MultiMirror)
+                        {
+                            selectedVerts *= PointerManager.m_Instance.CustomMirrorMatrices.Count;
+                        }
+
                         if (!SketchMemoryScript.m_Instance.MemoryWarningAccepted &&
                             SketchMemoryScript.m_Instance.WillVertCountPutUsOverTheMemoryLimit(selectedVerts))
                         {
@@ -4620,7 +4626,7 @@ namespace TiltBrush
                         else
                         {
                             ClipboardManager.Instance.DuplicateSelection(
-                                offsetDuplicate: !IsUserInteractingWithSelectionWidget());
+                                stampMode: IsUserInteractingWithSelectionWidget());
                         }
                         EatToolScaleInput();
                         break;
@@ -4651,24 +4657,10 @@ namespace TiltBrush
                     SaveModel();
                     break;
                 case GlobalCommands.ViewPolyPage:
-                    if (!App.Config.IsMobileHardware)
-                    {
-                        OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                            InputManager.ControllerName.Brush,
-                            kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                    }
-                    App.OpenURL(kPolyMainPageUri);
-                    EatGazeObjectInput();
+                    OpenURLAndInformUser(kPolyMainPageUri);
                     break;
                 case GlobalCommands.ViewPolyGallery:
-                    if (!App.Config.IsMobileHardware)
-                    {
-                        OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                            InputManager.ControllerName.Brush,
-                            kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                    }
-                    App.OpenURL(kBlocksGalleryUrl);
-                    EatGazeObjectInput();
+                    OpenURLAndInformUser(kBlocksGalleryUrl);
                     break;
                 case GlobalCommands.ExportListed:
                     StartCoroutine(ExportListAndQuit());
@@ -4819,47 +4811,16 @@ namespace TiltBrush
                     }
                     break;
                 case GlobalCommands.ShowTos:
-                    // Launch external window and tell the user we did so
-                    EatGazeObjectInput();
-                    if (!App.Config.IsMobileHardware)
-                    {
-                        OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                            InputManager.ControllerName.Brush,
-                            kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                    }
-                    App.OpenURL(m_TosURL);
+                    OpenURLAndInformUser(m_TosURL);
                     break;
                 case GlobalCommands.ShowPrivacy:
-                    // Launch external window and tell the user we did so
-                    EatGazeObjectInput();
-                    if (!App.Config.IsMobileHardware)
-                    {
-                        OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                            InputManager.ControllerName.Brush,
-                            kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                    }
-                    App.OpenURL(m_PrivacyURL);
+                    OpenURLAndInformUser(m_PrivacyURL);
                     break;
                 case GlobalCommands.ShowQuestSideLoading:
-                    // Launch external window and tell the user we did so
-                    EatGazeObjectInput();
-                    if (!App.Config.IsMobileHardware)
-                    {
-                        OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                            InputManager.ControllerName.Brush,
-                            kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                    }
-                    App.OpenURL(m_QuestSideLoadingHowToURL);
+                    OpenURLAndInformUser(m_QuestSideLoadingHowToURL);
                     break;
                 case GlobalCommands.ShowContribution:
-                    EatGazeObjectInput();
-                    if (!App.Config.IsMobileHardware)
-                    {
-                        OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                            InputManager.ControllerName.Brush,
-                            kRemoveHeadsetFyi, fPopScalar: 0.5f);
-                    }
-                    App.OpenURL(m_ContributionURL);
+                    OpenURLAndInformUser(m_ContributionURL);
                     break;
                 case GlobalCommands.UnloadReferenceImageCatalog:
                     ReferenceImageCatalog.m_Instance.UnloadAllImages();
@@ -4887,18 +4848,36 @@ namespace TiltBrush
                     EatGazeObjectInput();
                     break;
                 case GlobalCommands.OpenScriptsCommandsList:
-                    // TODO refactor code above to use this method
-                    OpenUrl($"http://localhost:{App.HttpServer.HttpPort}/help/commands");
+                    OpenURLAndInformUser($"http://localhost:{App.HttpServer.HttpPort}/help/commands");
                     break;
                 case GlobalCommands.OpenScriptsList:
-                    // TODO refactor code above to use this method
-                    OpenUrl($"http://localhost:{App.HttpServer.HttpPort}/scripts");
+                    OpenURLAndInformUser($"http://localhost:{App.HttpServer.HttpPort}/scripts");
                     break;
                 case GlobalCommands.OpenExampleScriptsList:
-                    // TODO refactor code above to use this method
-                    OpenUrl($"http://localhost:{App.HttpServer.HttpPort}/examplescripts");
+                    OpenURLAndInformUser($"http://localhost:{App.HttpServer.HttpPort}/examplescripts");
                     break;
+                case GlobalCommands.MultiplayerTogglePanel:
+                    m_PanelManager.ToggleMultiplayerPanels();
+                    PointerManager.m_Instance.EatLineEnabledInput();
+                    SketchSurfacePanel.m_Instance.EatToolsInput();
+                    break;
+                case GlobalCommands.DisplaySynchInfo:
+                    MultiplayerSceneSync.m_Instance.StartSynchInfo();
+                    break;
+                case GlobalCommands.SynchInfoPercentageUpdate:
+                    MultiplayerSceneSync.m_Instance.SynchInfoPercentageUpdate();
+                    break;
+                case GlobalCommands.HideSynchInfo:
+                    MultiplayerSceneSync.m_Instance.HideSynchInfo();
+                    break;
+                case GlobalCommands.RepaintOptions: break; // Intentionally blank.
                 case GlobalCommands.Null: break; // Intentionally blank.
+                case GlobalCommands.MultiplayerPanelOptions: break; // Intentionally blank.
+                case GlobalCommands.MultiplayerJoinRoom: break; // Intentionally blank.
+                case GlobalCommands.MultiplayerLeaveRoom: break; // Intentionally blank.
+                case GlobalCommands.MultiplayerConnect: break; // Intentionally blank.
+                case GlobalCommands.MultiplayerDisconnect: break; // Intentionally blank.
+                case GlobalCommands.WhatIsNew: break;// Intentionally blank.
                 default:
                     Debug.LogError($"Unrecognized command {rEnum}");
                     break;
@@ -4924,15 +4903,16 @@ namespace TiltBrush
             }
         }
 
-        private void OpenUrl(string url)
+        public void OpenURLAndInformUser(string url)
         {
+            // On desktop - launch external browser and inform the user
+            // On mobile - the browser appears over the app
             if (!App.Config.IsMobileHardware)
             {
                 OutputWindowScript.m_Instance.CreateInfoCardAtController(
                     InputManager.ControllerName.Brush,
                     kRemoveHeadsetFyi, fPopScalar: 0.5f);
             }
-
             App.OpenURL(url);
             EatGazeObjectInput();
         }
@@ -4944,7 +4924,7 @@ namespace TiltBrush
                 case GlobalCommands.StraightEdge: return PointerManager.m_Instance.StraightEdgeModeEnabled;
                 case GlobalCommands.StraightEdgeMeterDisplay: return PointerManager.m_Instance.StraightEdgeGuide.IsShowingMeter();
                 case GlobalCommands.SymmetryPlane: return PointerManager.m_Instance.CurrentSymmetryMode == SymmetryMode.SinglePlane;
-                case GlobalCommands.SymmetryFour: return PointerManager.m_Instance.CurrentSymmetryMode == SymmetryMode.FourAroundY;
+                case GlobalCommands.MultiMirror: return PointerManager.m_Instance.CurrentSymmetryMode == SymmetryMode.MultiMirror;
                 case GlobalCommands.SymmetryTwoHanded: return PointerManager.m_Instance.CurrentSymmetryMode == SymmetryMode.TwoHanded;
                 case GlobalCommands.AutoOrient: return m_AutoOrientAfterRotation;
                 case GlobalCommands.AudioVisualization: return VisualizerManager.m_Instance.VisualsRequested;
@@ -4960,15 +4940,13 @@ namespace TiltBrush
                 case GlobalCommands.YouTubeChat: return m_YouTubeChatWidget != null;
                 case GlobalCommands.StencilsDisabled: return m_WidgetManager.StencilsDisabled;
                 case GlobalCommands.StraightEdgeShape:
-                    if (Config.IsExperimental)
-                    {
-                        return PointerManager.m_Instance.StraightEdgeGuide.TempShape == (StraightEdgeGuideScript.Shape)iParam ||
-                            (PointerManager.m_Instance.StraightEdgeGuide.TempShape == StraightEdgeGuideScript.Shape.None
-                            && PointerManager.m_Instance.StraightEdgeGuide.CurrentShape == (StraightEdgeGuideScript.Shape)iParam);
-                    }
-                    else return false;
+                    // Previously experimental mode only.
+                    // Untested and currently untriggerable.
+                    return PointerManager.m_Instance.StraightEdgeGuide.TempShape == (StraightEdgeGuideScript.Shape)iParam ||
+                        (PointerManager.m_Instance.StraightEdgeGuide.TempShape == StraightEdgeGuideScript.Shape.None
+                        && PointerManager.m_Instance.StraightEdgeGuide.CurrentShape == (StraightEdgeGuideScript.Shape)iParam);
                 case GlobalCommands.Disco: return LightsControlScript.m_Instance.DiscoMode;
-                case GlobalCommands.ToggleGroupStrokesAndWidgets: return SelectionManager.m_Instance.SelectionIsInOneGroup;
+                case GlobalCommands.ToggleGroupStrokesAndWidgets: return SelectionManager.m_Instance.UngroupingAllowed;
                 case GlobalCommands.ToggleProfiling: return UnityEngine.Profiling.Profiler.enabled;
                 case GlobalCommands.ToggleCameraPostEffects: return CameraConfig.PostEffects;
                 case GlobalCommands.ToggleWatermark: return CameraConfig.Watermark;
@@ -5039,8 +5017,10 @@ namespace TiltBrush
             // TODO: hide gallery view / publish if there are no saved sketches
             switch (rEnum)
             {
-                case GlobalCommands.Undo: return SketchMemoryScript.m_Instance.CanUndo();
-                case GlobalCommands.Redo: return SketchMemoryScript.m_Instance.CanRedo();
+                case GlobalCommands.Undo:
+                    return SketchMemoryScript.m_Instance.CanUndo() && !(MultiplayerManager.m_Instance.State == ConnectionState.IN_ROOM);
+                case GlobalCommands.Redo:
+                    return SketchMemoryScript.m_Instance.CanRedo() && !(MultiplayerManager.m_Instance.State == ConnectionState.IN_ROOM);
                 case GlobalCommands.Save:
                     bool canSave =
                         SaveLoadScript.m_Instance.SceneFile.Valid &&
@@ -5078,7 +5058,7 @@ namespace TiltBrush
                         (VrAssetService.m_Instance.UploadProgress <= 0.0f) &&
                         IsCommandAvailable(GlobalCommands.UploadToGenericCloud);
                 case GlobalCommands.NewSketch:
-                    return SketchHasChanges();
+                    return SketchHasChanges() && !(MultiplayerManager.m_Instance.State == ConnectionState.IN_ROOM);
                 case GlobalCommands.Credits:
                 case GlobalCommands.AshleysSketch:
                     return !SketchHasChanges() && !SketchMemoryScript.m_Instance.IsMemoryDirty();
@@ -5092,8 +5072,8 @@ namespace TiltBrush
                 case GlobalCommands.ToggleGroupStrokesAndWidgets: return SelectionManager.m_Instance.SelectionCanBeGrouped;
                 case GlobalCommands.SaveModel: return SelectionManager.m_Instance.HasSelection;
                 case GlobalCommands.SummonMirror:
-                    return PointerManager.m_Instance.CurrentSymmetryMode ==
-                        SymmetryMode.SinglePlane;
+                    return PointerManager.m_Instance.CurrentSymmetryMode !=
+                        SymmetryMode.None;
                 case GlobalCommands.InvertSelection:
                 case GlobalCommands.FlipSelection:
                     return SelectionManager.m_Instance.HasSelection;
@@ -5110,7 +5090,25 @@ namespace TiltBrush
                     return m_WidgetManager.AnyActivePathHasAKnot();
                 case GlobalCommands.GoogleDriveSync:
                     return App.GoogleIdentity.LoggedIn;
-                case GlobalCommands.RecordCameraPath: return m_WidgetManager.CameraPathsVisible;
+                case GlobalCommands.RecordCameraPath:
+                    return m_WidgetManager.CameraPathsVisible;
+                case GlobalCommands.AdvancedPanelsToggle:
+                    return !(MultiplayerManager.m_Instance.State == ConnectionState.IN_ROOM);
+                case GlobalCommands.MultiplayerConnect:
+                    return MultiplayerManager.m_Instance.IsConnectable();
+                case GlobalCommands.MultiplayerDisconnect:
+                    return MultiplayerManager.m_Instance.IsDisconnectable();
+                case GlobalCommands.MultiplayerJoinRoom:
+                    return !PanelManager.m_Instance.AdvancedModeActive() && MultiplayerManager.m_Instance.CanJoinRoom() && !SceneSettings.m_Instance.GetDesiredPreset().isPassthrough;
+                case GlobalCommands.MultiplayerLeaveRoom:
+                    return MultiplayerManager.m_Instance.CanLeaveRoom();
+                case GlobalCommands.Sketchbook:
+                case GlobalCommands.SketchbookMenu:
+                case GlobalCommands.EditMultiplayerNickName:
+                case GlobalCommands.EditMultiplayerRoomName:
+                    return !(MultiplayerManager.m_Instance.State == ConnectionState.IN_ROOM);
+                case GlobalCommands.WhatIsNew:
+                    return false;
             }
             return true;
         }
@@ -5122,6 +5120,7 @@ namespace TiltBrush
                 SceneSettings.m_Instance.EnvironmentChanged ||
                 LightsControlScript.m_Instance.LightsChanged ||
                 m_WidgetManager.ModelWidgets.Any(w => w.gameObject.activeSelf) ||
+                m_WidgetManager.LightWidgets.Any(w => w.gameObject.activeSelf) ||
                 m_WidgetManager.StencilWidgets.Any(w => w.gameObject.activeSelf) ||
                 m_WidgetManager.ImageWidgets.Any(w => w.gameObject.activeSelf) ||
                 m_WidgetManager.VideoWidgets.Any(w => w.gameObject.activeSelf) ||
@@ -5172,7 +5171,7 @@ namespace TiltBrush
             }
             else
             {
-                ProfilingManager.Instance.StartProfiling(App.UserConfig.Profiling.ProflingMode);
+                ProfilingManager.Instance.StartProfiling(App.UserConfig.Profiling.ProfilingMode);
             }
         }
 
@@ -5209,7 +5208,7 @@ namespace TiltBrush
             InputManager.Wand.Geometry.transform.rotation = Camera.main.transform.rotation;
             m_PanelManager.LockPanelsToController();
 
-            ProfilingManager.Instance.StartProfiling(App.UserConfig.Profiling.ProflingMode);
+            ProfilingManager.Instance.StartProfiling(App.UserConfig.Profiling.ProfilingMode);
             yield return new WaitForSeconds(App.UserConfig.Profiling.Duration);
             ProfilingManager.Instance.StopProfiling();
 

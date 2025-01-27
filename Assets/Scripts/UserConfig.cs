@@ -41,18 +41,34 @@ namespace TiltBrush
             public bool GuideToggleVisiblityOnly;
             public bool HighResolutionSnapshots; // Deprecated
             public bool ShowDroppedFrames;
+            public bool LargeMeshSupport;
+            public bool EnableMonoscopicMode;
+
+            private bool? m_DisableXrMode;
+            public bool DisableXrMode
+            {
+                get
+                {
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+                    return true;
+#else
+                    return m_DisableXrMode ?? false;
+#endif
+                }
+                set { m_DisableXrMode = value; }
+            }
 
             public bool EnableApiRemoteCalls;
             public bool EnableApiCorsHeaders;
 
-            bool? m_ShowDangerousBrushes;
-            public bool ShowDangerousBrushes
+            bool? m_AdvancedKeyboardShortcuts;
+            public bool AdvancedKeyboardShortcuts
             {
                 get
                 {
-                    return m_ShowDangerousBrushes ?? Config.IsExperimental;
+                    return m_AdvancedKeyboardShortcuts ?? false;
                 }
-                set { m_ShowDangerousBrushes = value; }
+                set { m_AdvancedKeyboardShortcuts = value; }
             }
 
             bool? m_PostEffectsOnCapture;
@@ -87,6 +103,13 @@ namespace TiltBrush
             {
                 get { return m_ShowControllers ?? true; }
                 set { m_ShowControllers = value; }
+            }
+
+            bool? m_SkipIntro;
+            public bool SkipIntro
+            {
+                get { return m_SkipIntro ?? false; }
+                set { m_SkipIntro = value; }
             }
 
             int? m_SnapshotHeight;
@@ -209,14 +232,7 @@ namespace TiltBrush
                 {
                     if (m_IncludeTags == null)
                     {
-                        if (App.Config.GetIsExperimental())
-                        {
-                            m_IncludeTags = new[] { "default", "experimental" };
-                        }
-                        else
-                        {
-                            m_IncludeTags = new[] { "default" };
-                        }
+                        m_IncludeTags = new[] { "default", "experimental" };
                     }
                     return m_IncludeTags;
                 }
@@ -230,6 +246,17 @@ namespace TiltBrush
             }
         }
         public BrushConfig Brushes;
+
+        [Serializable]
+        public struct ImportConfig
+        {
+            bool? m_UseUnityGltf;
+            public bool UseUnityGltf
+            {
+                get { return m_UseUnityGltf ?? false; }
+                set { m_UseUnityGltf = value; }
+            }
+        }
 
         [Serializable]
         public struct ExportConfig
@@ -254,7 +281,38 @@ namespace TiltBrush
                 get { return m_ExportStrokeTimestamp ?? true; }
                 set { m_ExportStrokeTimestamp = value; }
             }
+
+            bool? m_ExportStrokeMetadata;
+            public bool ExportStrokeMetadata
+            {
+                get { return m_ExportStrokeMetadata ?? false; }
+                set { m_ExportStrokeMetadata = value; }
+            }
+
+            bool? m_KeepStrokes;
+            public bool KeepStrokes
+            {
+                get { return m_KeepStrokes ?? false; }
+                set { m_KeepStrokes = value; }
+            }
+
+            bool? m_KeepGroups;
+            public bool KeepGroups
+            {
+                get { return m_KeepGroups ?? true; }
+                set { m_KeepGroups = value; }
+            }
+
+            private Dictionary<string, bool> m_Formats;
+            [JsonProperty]
+            public Dictionary<string, bool> Formats
+            {
+                get { return m_Formats ?? null; }
+                set => m_Formats = value;
+            }
         }
+
+        public ImportConfig Import;
         public ExportConfig Export;
 
         [Serializable]
@@ -485,36 +543,33 @@ namespace TiltBrush
                 get
                 {
                     Dictionary<Guid, Guid> results = new Dictionary<Guid, Guid>();
-                    if (Config.IsExperimental)
+                    if (string.IsNullOrEmpty(BrushReplacements))
                     {
-                        if (string.IsNullOrEmpty(BrushReplacements))
+                        return results;
+                    }
+                    var replacements = BrushReplacements.Split(',');
+                    foreach (string replacement in replacements)
+                    {
+                        string[] pair = replacement.Split('=');
+                        if (pair.Length == 2)
                         {
-                            return results;
-                        }
-                        var replacements = BrushReplacements.Split(',');
-                        foreach (string replacement in replacements)
-                        {
-                            string[] pair = replacement.Split('=');
-                            if (pair.Length == 2)
+                            if (pair[0] == "*")
                             {
-                                if (pair[0] == "*")
+                                Guid guid = new Guid(pair[1]);
+                                foreach (var brush in App.Instance.ManifestFull.Brushes)
                                 {
-                                    Guid guid = new Guid(pair[1]);
-                                    foreach (var brush in App.Instance.m_Manifest.Brushes)
-                                    {
-                                        results.Add(brush.m_Guid, guid);
-                                    }
-                                }
-                                else
-                                {
-                                    results.Add(new Guid(pair[0]), new Guid(pair[1]));
+                                    results.Add(brush.m_Guid, guid);
                                 }
                             }
                             else
                             {
-                                OutputWindowScript.Error("BrushReplacement should be of the form:\n" +
-                                    "brushguidA=brushguidB,brushguidC=brushguidD");
+                                results.Add(new Guid(pair[0]), new Guid(pair[1]));
                             }
+                        }
+                        else
+                        {
+                            OutputWindowScript.Error("BrushReplacement should be of the form:\n" +
+                                "brushguidA=brushguidB,brushguidC=brushguidD");
                         }
                     }
                     return results;
@@ -536,7 +591,7 @@ namespace TiltBrush
         {
             public const int kDefaultScreenshotResolution = 1000;
             public string[] ProfilingFunctions { get; private set; }
-            public ProfilingManager.Mode ProflingMode { get; private set; }
+            public ProfilingManager.Mode ProfilingMode { get; private set; }
 
             public string Mode
             {
@@ -544,7 +599,7 @@ namespace TiltBrush
                 {
                     try
                     {
-                        ProflingMode = (ProfilingManager.Mode)Enum.Parse(typeof(ProfilingManager.Mode), value);
+                        ProfilingMode = (ProfilingManager.Mode)Enum.Parse(typeof(ProfilingManager.Mode), value);
                     }
                     catch (ArgumentException)
                     {

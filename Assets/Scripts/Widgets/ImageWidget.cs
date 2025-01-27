@@ -31,10 +31,11 @@ namespace TiltBrush
         private ReferenceImage m_ReferenceImage;
         private bool m_TextureAcquired;
 
-        /// A string which can be passed to ReferenceImageCatalog.FileNameToIndex.
-        /// Currently, this is a file _name_.
         public string FileName =>
             m_ReferenceImage?.FileName ?? m_MissingInfo?.fileName ?? Unused("Error");
+
+        public string RelativePath =>
+            m_ReferenceImage?.RelativePath ?? m_MissingInfo?.fileName ?? Unused("Error");
 
         /// width / height
         public override float? AspectRatio =>
@@ -58,12 +59,17 @@ namespace TiltBrush
             ReleaseTexture();
         }
 
-        override public GrabWidget Clone()
+        public override GrabWidget Clone()
+        {
+            return Clone(transform.position, transform.rotation, m_Size);
+        }
+
+        override public GrabWidget Clone(Vector3 position, Quaternion rotation, float size)
         {
             ImageWidget clone = Instantiate(WidgetManager.m_Instance.ImageWidgetPrefab);
             clone.m_PreviousCanvas = m_PreviousCanvas;
-            clone.transform.position = transform.position;
-            clone.transform.rotation = transform.rotation;
+            clone.transform.position = position;
+            clone.transform.rotation = rotation;
             // We're obviously not loading from a sketch.  This is to prevent the intro animation.
             // TODO: Change variable name to something more explicit of what this flag does.
             clone.m_LoadingFromSketch = true;
@@ -77,7 +83,7 @@ namespace TiltBrush
             clone.ReferenceImage = m_ReferenceImage;
             clone.Show(true, false);
             clone.transform.parent = transform.parent;
-            clone.SetSignedWidgetSize(this.m_Size);
+            clone.SetSignedWidgetSize(size);
             clone.UseLegacyTint = this.m_UseLegacyTint;
             HierarchyUtils.RecursivelySetLayer(clone.transform, gameObject.layer);
             TiltMeterScript.m_Instance.AdjustMeterWithWidget(clone.GetTiltMeterCost(), up: true);
@@ -106,7 +112,7 @@ namespace TiltBrush
             }
             else
             {
-                return Path.GetFileNameWithoutExtension(FileName);
+                return Path.GetFileNameWithoutExtension(RelativePath);
             }
         }
 
@@ -204,9 +210,13 @@ namespace TiltBrush
 
         public static void FromTiltImage(TiltImages75 tiltImage)
         {
-            var refImage = ReferenceImageCatalog.m_Instance.FileNameToImage(tiltImage.FileName);
+
+            var refImage = string.IsNullOrEmpty(tiltImage.FilePath) ?
+                ReferenceImageCatalog.m_Instance.FileNameToImage(tiltImage.FileName) :
+                ReferenceImageCatalog.m_Instance.RelativePathToImage(tiltImage.FilePath);
             var groupIds = tiltImage.GroupIds;
             var layerIds = tiltImage.LayerIds;
+            var twoSidedFlags = tiltImage.TwoSidedFlags;
             for (int i = 0; i < tiltImage.Transforms.Length; ++i)
             {
                 ImageWidget image = Instantiate(WidgetManager.m_Instance.ImageWidgetPrefab);
@@ -237,10 +247,15 @@ namespace TiltBrush
                 uint groupId = (groupIds != null && i < groupIds.Length) ? groupIds[i] : 0;
                 image.Group = App.GroupManager.GetGroupFromId(groupId);
                 int layerId = (layerIds == null || i >= layerIds.Length) ? 0 : layerIds[i];
+                image.TwoSided = twoSidedFlags != null && i < twoSidedFlags.Length && twoSidedFlags[i];
                 image.SetCanvas(App.Scene.GetOrCreateLayer(layerId));
                 TiltMeterScript.m_Instance.AdjustMeterWithWidget(image.GetTiltMeterCost(), up: true);
             }
         }
 
+        public bool HasSubShapes()
+        {
+            throw new System.NotImplementedException();
+        }
     }
 } // namespace TiltBrush

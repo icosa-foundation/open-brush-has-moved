@@ -32,6 +32,10 @@ using System.Linq;
 using System.Reflection;
 using UnityEngine;
 
+#if OCULUS_SUPPORTED
+using Unity.XR.Oculus;
+#endif
+
 namespace TiltBrush
 {
     public enum XrSdkMode
@@ -41,6 +45,7 @@ namespace TiltBrush
         Oculus,
         Wave,
         Pico,
+        Zapbox,
     }
 
     // The sdk mode indicates which SDK that we're using to drive the display.
@@ -61,8 +66,9 @@ namespace TiltBrush
     {
         None = -1,
         Button = 0,
-        Slider,
-        PreviewCube,
+        Slider = 1,
+        PreviewCube = 2,
+        VerticalSlider = 3,
     }
 
     /// Script Ordering:
@@ -107,9 +113,6 @@ namespace TiltBrush
         // The sdk mode indicates which SDK that we're using to drive the display.
         public SdkMode m_SdkMode;
 
-        // Stores the value of IsExperimental at startup time
-        [NonSerialized] public bool m_WasExperimentalAtStartup;
-
         // Whether or not to just do an automatic profile and then exit.
         public bool m_AutoProfile;
         // How long to wait before starting to profile.
@@ -120,11 +123,15 @@ namespace TiltBrush
         public string[] m_SketchFiles = new string[0];
         [NonSerialized] public bool m_QuickLoad = true;
 
-        public SecretsConfig.ServiceAuthData GoogleSecrets => Secrets[SecretsConfig.Service.Google];
+        public SecretsConfig.ServiceAuthData GoogleSecrets => Secrets?[SecretsConfig.Service.Google];
         public SecretsConfig.ServiceAuthData SketchfabSecrets => Secrets[SecretsConfig.Service.Sketchfab];
         public SecretsConfig.ServiceAuthData OculusSecrets => Secrets[SecretsConfig.Service.Oculus];
         public SecretsConfig.ServiceAuthData OculusMobileSecrets => Secrets[SecretsConfig.Service.OculusMobile];
         public SecretsConfig.ServiceAuthData PimaxSecrets => Secrets[SecretsConfig.Service.Pimax];
+        public SecretsConfig.ServiceAuthData PhotonFusionSecrets => Secrets[SecretsConfig.Service.PhotonFusion];
+        public SecretsConfig.ServiceAuthData PhotonVoiceSecrets => Secrets[SecretsConfig.Service.PhotonVoice];
+
+        public bool DisableAccountLogins;
 
         /// Return a value kinda sorta half-way between "building for Android" and "running on Android"
         /// In order of increasing strictness, here are the in-Editor semantics of various methods
@@ -148,8 +155,10 @@ namespace TiltBrush
             // but their editor platform is still set to Windows.
 #if UNITY_EDITOR && UNITY_ANDROID
             get => Application.platform == RuntimePlatform.Android || SpoofMobileHardware.MobileHardware;
+#elif UNITY_EDITOR && UNITY_IOS
+            get => Application.platform == RuntimePlatform.IPhonePlayer || SpoofMobileHardware.MobileHardware;
 #else
-            get => Application.platform == RuntimePlatform.Android;
+            get => Application.platform == RuntimePlatform.Android || Application.platform == RuntimePlatform.IPhonePlayer;
 #endif
         }
 
@@ -164,7 +173,7 @@ namespace TiltBrush
 
         [Header("Versioning")]
         public string m_VersionNumber; // eg "17.0b", "18.3"
-        public string m_BuildStamp;    // eg "f73783b61", "f73783b61-exp", "(menuitem)"
+        public string m_BuildStamp;    // eg "f73783b61", "f73783b61-exp", "menuitem"
 
         [Header("Misc")]
         public bool m_UseBatchedBrushes;
@@ -213,6 +222,8 @@ namespace TiltBrush
         [SerializeField] GameObject m_ButtonDescriptionThreeLinesPrefab;
         [SerializeField] GameObject m_SliderDescriptionOneLinePrefab;
         [SerializeField] GameObject m_SliderDescriptionTwoLinesPrefab;
+        [SerializeField] GameObject m_VerticalSliderDescriptionOneLinePrefab;
+        [SerializeField] GameObject m_VerticalSliderDescriptionTwoLinesPrefab;
         [SerializeField] GameObject m_PreviewCubeDescriptionOneLinePrefab;
         [SerializeField] GameObject m_PreviewCubeDescriptionTwoLinesPrefab;
 
@@ -241,6 +252,16 @@ namespace TiltBrush
                             return Instantiate(m_SliderDescriptionOneLinePrefab);
                         case 2:
                             return Instantiate(m_SliderDescriptionTwoLinesPrefab);
+                        default:
+                            throw new Exception($"{type} description does not have a ${numberOfLines} line variant");
+                    }
+                case DescriptionType.VerticalSlider:
+                    switch (numberOfLines)
+                    {
+                        case 1:
+                            return Instantiate(m_VerticalSliderDescriptionOneLinePrefab);
+                        case 2:
+                            return Instantiate(m_VerticalSliderDescriptionTwoLinesPrefab);
                         default:
                             throw new Exception($"{type} description does not have a ${numberOfLines} line variant");
                     }
@@ -492,28 +513,31 @@ namespace TiltBrush
             get => PlayerPrefs.HasKey("ExperimentalMode") && PlayerPrefs.GetInt("ExperimentalMode") == 1;
         }
 
-        // Non-Static version of above
-        public bool GetIsExperimental()
+        public bool GeometryShaderSuppported
         {
-            return PlayerPrefs.HasKey("ExperimentalMode") && PlayerPrefs.GetInt("ExperimentalMode") == 1;
+            get
+            {
+#if OCULUS_SUPPORTED
+                SystemHeadset headset = Unity.XR.Oculus.Utils.GetSystemHeadsetType();
+                return headset != SystemHeadset.Oculus_Quest;
+#endif // OCULUS_SUPPORTED
+#if ZAPBOX_SUPPORTED
+                return false;
+#endif
+                return SystemInfo.supportsGeometryShaders;
+            }
         }
 
         public void SetIsExperimental(bool active)
         {
             PlayerPrefs.SetInt("ExperimentalMode", active ? 1 : 0);
+            BrushCatalog.m_Instance.Init();
+            BrushCatalog.m_Instance.BeginReload();
         }
 
         void Awake()
         {
             m_SingletonState = this;
-            m_WasExperimentalAtStartup = GetIsExperimental();
-
-            // Force mono to experimental and quit.
-            if (m_SdkMode == SdkMode.Monoscopic && !m_WasExperimentalAtStartup)
-            {
-                SetIsExperimental(true);
-                Application.Quit();
-            }
 
 #if UNITY_EDITOR
             if (!string.IsNullOrEmpty(m_FakeCommandLineArgsInEditor))
@@ -534,7 +558,7 @@ namespace TiltBrush
                     Application.Quit();
                 }
             }
-#elif !UNITY_ANDROID
+#elif !(UNITY_ANDROID || UNITY_IOS)
             try
             {
                 ParseArgs(System.Environment.GetCommandLineArgs());
@@ -547,12 +571,9 @@ namespace TiltBrush
 #endif
 
             m_BrushReplacement = new Dictionary<Guid, Guid>();
-            if (IsExperimental)
+            foreach (var brush in m_BrushReplacementMap)
             {
-                foreach (var brush in m_BrushReplacementMap)
-                {
-                    m_BrushReplacement.Add(new Guid(brush.FromGuid), new Guid(brush.ToGuid));
-                }
+                m_BrushReplacement.Add(new Guid(brush.FromGuid), new Guid(brush.ToGuid));
             }
         }
 
@@ -640,9 +661,10 @@ namespace TiltBrush
 
 #if UNITY_EDITOR
         /// Called at build time, just before this Config instance is saved to Main.unity
-        public void DoBuildTimeConfiguration(UnityEditor.BuildTarget target)
+        public void DoBuildTimeConfiguration(UnityEditor.BuildTarget target, bool disableAccountLogins = false)
         {
             m_PlatformConfig = EditTimeAssetReferences.Instance.GetConfigForBuildTarget(target);
+            DisableAccountLogins = disableAccountLogins;
         }
 #endif
     }

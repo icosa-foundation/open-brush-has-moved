@@ -16,6 +16,9 @@ using UnityEngine;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using TiltBrush;
+using System.Collections;
+using System.Threading.Tasks;
 
 namespace TiltBrush
 {
@@ -36,6 +39,10 @@ namespace TiltBrush
         public static SketchMemoryScript m_Instance;
 
         public event Action OperationStackChanged;
+        public event Action NetworkOperationStackChanged;
+        public Action<BaseCommand> CommandPerformed;
+        public Action<BaseCommand> CommandUndo;
+        public Action<BaseCommand> CommandRedo;
 
         public GameObject m_UndoBatchMeshPrefab;
         public GameObject m_UndoBatchMesh;
@@ -77,6 +84,8 @@ namespace TiltBrush
         private Stack<BaseCommand> m_OperationStack;
         // stack of undone operations available for redo
         private Stack<BaseCommand> m_RedoStack;
+        // stack of network sketch operations
+        private Stack<BaseCommand> m_NetworkStack = new Stack<BaseCommand>();
 
         // Memory list by timestamp of initial control point.  The nodes of this list are
         // embedded in MemoryObject.  Notable properties:
@@ -188,6 +197,18 @@ namespace TiltBrush
             get { return m_MemoryList; }
         }
 
+        public IEnumerable<BaseCommand> GetAllOperations()
+        {
+            var allCommands = m_OperationStack.Concat(m_NetworkStack);
+
+            return allCommands.OrderBy(command => command.NetworkTimestamp);
+        }
+
+        public void AddCommandToNetworkStack(BaseCommand command)
+        {
+            m_NetworkStack.Push(command);
+        }
+
         public Stroke GetStrokeAtIndex(int index)
         {
             return m_Instance.m_MemoryList.ElementAt(index);
@@ -240,7 +261,7 @@ namespace TiltBrush
             if (!m_MemoryExceeded)
             {
                 // Only do the memory check in the AppState.Standard.  The AppState.MemoryWarning exits to
-                // AppState.Standard, so interrupting any other state would have bad consequences. 
+                // AppState.Standard, so interrupting any other state would have bad consequences.
                 if (App.CurrentState == App.AppState.Standard)
                 {
                     m_LastCheckedVertCount =
@@ -278,6 +299,7 @@ namespace TiltBrush
             }
             return false;
         }
+
 
         public bool CanUndo() { return m_OperationStack.Count > 0; }
         public bool CanRedo() { return m_RedoStack.Count > 0; }
@@ -340,7 +362,7 @@ namespace TiltBrush
                     PerformAndRecordCommand(m_RepaintStrokeParent);
                     m_RepaintStrokeParent = null;
                 }
-                OperationStackChanged();
+                OperationStackChanged?.Invoke();
             }
         }
 
@@ -371,8 +393,9 @@ namespace TiltBrush
             return duplicate;
         }
 
-        public void PerformAndRecordCommand(BaseCommand command, bool discardIfNotMerged = false)
+        public void PerformAndRecordCommand(BaseCommand command, bool discardIfNotMerged = false, bool invoke = true)
         {
+            SketchSurfacePanel.m_Instance.m_LastCommand = command;
             bool discardCommand = discardIfNotMerged;
             BaseCommand delta = command;
             ClearRedo();
@@ -394,7 +417,23 @@ namespace TiltBrush
             }
             delta.Redo();
             m_OperationStack.Push(command);
-            OperationStackChanged();
+            OperationStackChanged?.Invoke();
+
+            if (invoke)
+            {
+                CommandPerformed?.Invoke(command);
+            }
+        }
+
+        /// Executes and records a network-synchronized command.
+        /// Note: This method does not include merge logic or parent-child relationship checks,
+        /// as these are already handled by the PhotonRPC system.
+        public void PerformAndRecordNetworkCommand(BaseCommand command, bool discard = false)
+        {
+            BaseCommand delta = command;
+            delta.Redo();
+            if (!discard) m_NetworkStack.Push(command);
+            NetworkOperationStackChanged?.Invoke();
         }
 
         // TODO: deprecate in favor of PerformAndRecordCommand
@@ -413,7 +452,8 @@ namespace TiltBrush
                 command = top;
             }
             m_OperationStack.Push(command);
-            OperationStackChanged();
+            OperationStackChanged?.Invoke();
+            CommandPerformed?.Invoke(command);
         }
 
         /// Returns approximate latest timestamp from the stroke list (including deleted strokes).
@@ -500,7 +540,8 @@ namespace TiltBrush
             BatchSubset subset, Color rColor, Guid brushGuid,
             float fBrushSize, float brushScale,
             List<PointerManager.ControlPoint> rControlPoints, StrokeFlags strokeFlags,
-            StencilWidget stencil, float lineLength, int seed)
+            StencilWidget stencil, float lineLength, int seed,
+            bool isFinalStroke)
         {
             // NOTE: PointerScript calls ClearRedo() in batch case
 
@@ -517,8 +558,10 @@ namespace TiltBrush
             rNewStroke.m_Seed = seed;
             subset.m_Stroke = rNewStroke;
 
-            SketchMemoryScript.m_Instance.RecordCommand(
-                new BrushStrokeCommand(rNewStroke, stencil, lineLength));
+            SketchMemoryScript.m_Instance.PerformAndRecordCommand(
+                new BrushStrokeCommand(rNewStroke, stencil, lineLength),
+                invoke: isFinalStroke
+            );
 
             if (m_SanityCheckStrokes)
             {
@@ -593,45 +636,90 @@ namespace TiltBrush
             }
         }
 
+        public void RepaintSelected(bool rebrush, bool recolor, bool resize, bool jitter)
+        {
+            float desiredSize = (1 / Coords.CanvasPose.scale) * PointerManager.m_Instance.MainPointer.BrushSizeAbsolute;
+            Guid desiredGuid = PointerManager.m_Instance
+                .GetPointer(InputManager.ControllerName.Brush).CurrentBrush.m_Guid;
+            Color desiredColor = PointerManager.m_Instance.PointerColor;
+
+            var strokes = SelectionManager.m_Instance.SelectedStrokes.ToList();
+            var newColors = new List<Color>();
+            var newGuids = new List<Guid>();
+            var newSizes = new List<float>();
+
+            foreach (var stroke in strokes)
+            {
+                GetRepaintParams(
+                    stroke,
+                    desiredGuid, desiredColor, desiredSize,
+                    rebrush, recolor, resize, jitter,
+                    out Color newColor, out Guid newGuid, out float newSize
+                );
+                newColors.Add(newColor);
+                newGuids.Add(newGuid);
+                newSizes.Add(newSize);
+            }
+            PerformAndRecordCommand(
+                new RepaintStrokeCommand(strokes, newColors, newGuids, newSizes)
+            );
+        }
+
+
+
+        public void GetRepaintParams(
+            Stroke stroke,
+            Guid desiredGuid, Color desiredColor, float desiredSize,
+            bool rebrush, bool recolor, bool resize, bool jitter,
+            out Color resultingColor, out Guid resultingGuid, out float resultingSize
+        )
+        {
+            resultingGuid = rebrush ? desiredGuid : stroke.m_BrushGuid;
+            resultingColor = recolor ? desiredColor : stroke.m_Color;
+            resultingSize = resize ? desiredSize : stroke.m_BrushSize;
+
+            // Is Jitter enabled?
+            if (jitter)
+            {
+                float colorLuminanceMin = BrushCatalog.m_Instance.GetBrush(resultingGuid).m_ColorLuminanceMin;
+                if (recolor) resultingColor = PointerManager.m_Instance.GenerateJitteredColor(colorLuminanceMin);
+                if (resize)
+                {
+                    BrushDescriptor desc = BrushCatalog.m_Instance.GetBrush(resultingGuid);
+                    resultingSize = PointerManager.m_Instance.GenerateJitteredSize(desc, resultingSize);
+                }
+            }
+        }
+
+
         public bool MemorizeStrokeRepaint(Stroke stroke, bool recolor, bool rebrush, bool resize, bool jitter = false, bool force = false)
         {
 
-            Guid currentBrushGuid = PointerManager.m_Instance
+            float desiredSize = (1 / Coords.CanvasPose.scale) * PointerManager.m_Instance.MainPointer.BrushSizeAbsolute;
+            Guid desiredGuid = PointerManager.m_Instance
                 .GetPointer(InputManager.ControllerName.Brush).CurrentBrush.m_Guid;
+            Color desiredColor = PointerManager.m_Instance.PointerColor;
 
-            float currentBrushSize = (1 / Coords.CanvasPose.scale) * PointerManager.m_Instance.MainPointer.BrushSizeAbsolute;
-
-            if (force || (recolor && stroke.m_Color != PointerManager.m_Instance.PointerColor) ||
-                (jitter && PointerManager.m_Instance.JitterEnabled) ||
-                (rebrush && stroke.m_BrushGuid != currentBrushGuid) ||
-                (resize && stroke.m_BrushSize != currentBrushSize))
+            // Don't run unless there's something to change
+            if (
+                force ||
+                ((recolor && stroke.m_Color != desiredColor) ||
+                (rebrush && stroke.m_BrushGuid != desiredGuid) ||
+                (resize && stroke.m_BrushSize != desiredSize) ||
+                (jitter && PointerManager.m_Instance.JitterEnabled))
+            )
             {
                 if (m_RepaintStrokeParent == null)
                 {
                     m_RepaintStrokeParent = new BaseCommand();
                 }
 
-                Color newColor = stroke.m_Color;
-                float newSize = stroke.m_BrushSize;
-
-                Guid newGuid = rebrush ? currentBrushGuid : stroke.m_BrushGuid;
-
-                if (jitter && PointerManager.m_Instance.JitterEnabled) // Is Jitter enabled?
-                {
-                    float colorLuminanceMin = BrushCatalog.m_Instance.GetBrush(newGuid).m_ColorLuminanceMin;
-                    if (recolor) newColor = PointerManager.m_Instance.GenerateJitteredColor(colorLuminanceMin);
-                    if (resize)
-                    {
-                        BrushDescriptor desc = BrushCatalog.m_Instance.GetBrush(newGuid);
-                        newSize = PointerManager.m_Instance.GenerateJitteredSize(desc, newSize);
-                    }
-
-                }
-                else
-                {
-                    if (recolor) newColor = PointerManager.m_Instance.PointerColor;
-                    if (resize) newSize = currentBrushSize;
-                }
+                GetRepaintParams(
+                    stroke,
+                    desiredGuid, desiredColor, desiredSize,
+                    rebrush, recolor, resize, jitter && PointerManager.m_Instance.JitterEnabled,
+                    out Color newColor, out Guid newGuid, out float newSize
+                );
 
                 var positionJitter = PointerManager.m_Instance.positionJitter;
                 if (positionJitter > 0)
@@ -706,7 +794,7 @@ namespace TiltBrush
         public List<Stroke> GetAllUnselectedActiveStrokes()
         {
             return m_MemoryList.Where(
-                s => s.IsGeometryEnabled && s.Canvas == App.Scene.MainCanvas &&
+                s => s.IsGeometryEnabled && s.Canvas == App.Scene.ActiveCanvas &&
                     (s.m_Type != Stroke.Type.BatchedBrushStroke ||
                     s.m_BatchSubset.m_VertLength > 0)).ToList();
         }
@@ -718,6 +806,16 @@ namespace TiltBrush
                 command.Dispose();
             }
             m_RedoStack.Clear();
+        }
+
+        public void ClearNetworkStack()
+        {
+            foreach (var command in m_NetworkStack)
+            {
+                command.Dispose();
+            }
+            m_NetworkStack.Clear();
+            NetworkOperationStackChanged?.Invoke();
         }
 
         public void ClearMemory()
@@ -742,7 +840,9 @@ namespace TiltBrush
                 }
             }
             m_OperationStack.Clear();
-            if (OperationStackChanged != null) { OperationStackChanged(); }
+            OperationStackChanged?.Invoke();
+            m_NetworkStack.Clear();
+            NetworkOperationStackChanged?.Invoke();
             m_LastOperationStackCount = 0;
             m_MemoryList.Clear();
             App.GroupManager.ResetGroups();
@@ -766,6 +866,7 @@ namespace TiltBrush
             Resources.UnloadUnusedAssets();
         }
 
+        // Repaint in doesn't relate to the repaint command
         public IEnumerator<float> RepaintCoroutine()
         {
             int numStrokes = m_MemoryList.Count;
@@ -857,20 +958,30 @@ namespace TiltBrush
             m_RepaintCoroutine = null;
         }
 
-        public void StepBack()
+        public void StepBack(bool invoke = true)
         {
             var comm = m_OperationStack.Pop();
             comm.Undo();
             m_RedoStack.Push(comm);
-            OperationStackChanged();
+            OperationStackChanged?.Invoke();
+
+            if (invoke)
+            {
+                CommandUndo?.Invoke(comm);
+            }
         }
 
-        public void StepForward()
+        public void StepForward(bool invoke = true)
         {
             var comm = m_RedoStack.Pop();
             comm.Redo();
             m_OperationStack.Push(comm);
-            OperationStackChanged();
+            OperationStackChanged?.Invoke();
+
+            if (invoke)
+            {
+                CommandRedo?.Invoke(comm);
+            }
         }
 
         public static IEnumerable<Stroke> AllStrokes()
@@ -881,6 +992,14 @@ namespace TiltBrush
         public static int AllStrokesCount()
         {
             return m_Instance.m_MemoryList.Count();
+        }
+
+        public List<Stroke> GetStrokesWithoutCommand()
+        {
+            return m_MemoryList
+                .Where(stroke => stroke.Command == null)
+                .OrderBy(s => s.HeadTimestampMs)
+                .ToList();
         }
 
         public static void InitUndoObject(BaseBrushScript rBrushScript)
@@ -1254,6 +1373,8 @@ namespace TiltBrush
 
         public static List<Stroke> GetStrokesBetween(int start, int end)
         {
+            if (m_Instance.StrokeCount == 0) return new List<Stroke>();
+
             int index0, index1;
             int lastStrokeIndex = m_Instance.StrokeCount - 1;
             if (start < 0)
@@ -1287,18 +1408,64 @@ namespace TiltBrush
             var result = new List<Stroke>();
             int i = index0;
             var node = GetNodeAtIndex(index0);
-            while (i < index1)
+
+            while (i <= index1)
             {
                 result.Add(node.Value);
+                i++;
+                if (i > index1) break;
                 node = node.Next;
                 if (node == null)
                 {
                     Debug.LogError($"Aborting early due to no next stroke in linked list");
                     break;
                 }
-                i++;
             }
+
             return result;
+        }
+
+        public bool IsStrokeInMemory(Guid strokeGuid)
+        {
+            return m_MemoryList.Any(stroke => stroke.m_Guid == strokeGuid);
+        }
+
+        public bool IsCommandInStack(Guid commandGuid)
+        {
+            return IsCommandInOperationStack(commandGuid) ||
+                   IsCommandInRedoStack(commandGuid) ||
+                   IsCommandInNetworkStack(commandGuid);
+        }
+
+        public bool IsCommandInOperationStack(Guid commandGuid)
+        {
+            return m_OperationStack.Any(command => command.Guid == commandGuid);
+        }
+
+        public bool IsCommandInRedoStack(Guid commandGuid)
+        {
+            return m_RedoStack.Any(command => command.Guid == commandGuid);
+        }
+
+        public bool IsCommandInNetworkStack(Guid commandGuid)
+        {
+            return m_NetworkStack.Any(command => command.Guid == commandGuid);
+        }
+
+        public void SetTimeOffsetToAllStacks(int m_NetworkOffsetTimestamp)
+        {
+            SetTimeOffset(m_RedoStack, m_NetworkOffsetTimestamp);
+            SetTimeOffset(m_OperationStack, m_NetworkOffsetTimestamp);
+            SetTimeOffset(m_NetworkStack, m_NetworkOffsetTimestamp);
+        }
+
+        public void SetTimeOffset(Stack<BaseCommand> stack, int m_NetworkOffsetTimestamp)
+        {
+            foreach (BaseCommand c in stack)
+            {
+                if (c.NetworkTimestamp == null)
+                    c.NetworkTimestamp = c.Timestamp - m_NetworkOffsetTimestamp;
+            }
         }
     }
 } // namespace TiltBrush

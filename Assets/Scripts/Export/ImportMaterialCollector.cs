@@ -48,31 +48,86 @@ namespace TiltBrush
             m_AssetLocation = assetLocation;
         }
 
+        // Used for SVG exports
+        public void AddSvgIem(Material unityMaterial)
+        {
+            m_MaterialToIem.Add(
+                unityMaterial,
+                new DynamicExportableMaterial(
+                    parent: TbtSettings.Instance.m_SvgMaterial.descriptor,
+                    durableName: unityMaterial.name,
+                    uniqueName: MakeDeterministicUniqueName(m_numAdded++, unityMaterial.name),
+                    uriBase: m_AssetLocation
+                )
+                {
+                    BaseColorFactor = Color.white,
+                    BaseColorTex = null,
+                }
+            );
+        }
+
 #if FBX_SUPPORTED
-  // Used for FBX imports
-  public void Add(
-      Material unityMaterial,
-      bool transparent, string baseColorUri, FbxSurfaceLambert fbxMaterial) {
-    if (baseColorUri != null) {
-      Debug.Assert(File.Exists(Path.Combine(m_AssetLocation, baseColorUri)));
-    }
+        // Used for FBX imports
+        public void Add(
+            Material unityMaterial,
+            bool transparent, string baseColorUri, FbxSurfaceLambert fbxMaterial)
+        {
+            if (baseColorUri != null)
+            {
+                Debug.Assert(File.Exists(Path.Combine(m_AssetLocation, baseColorUri)));
+            }
 
-    TbtSettings.PbrMaterialInfo pbrInfo = transparent
-        ? TbtSettings.Instance.m_PbrBlendDoubleSided
-        : TbtSettings.Instance.m_PbrOpaqueDoubleSided;
+            TbtSettings.PbrMaterialInfo pbrInfo = transparent
+                ? TbtSettings.Instance.m_PbrBlendDoubleSided
+                : TbtSettings.Instance.m_PbrOpaqueDoubleSided;
 
-    m_MaterialToIem.Add(
-        unityMaterial,
-        new DynamicExportableMaterial(
-            parent: pbrInfo.descriptor,
-            durableName: fbxMaterial.GetName(),
-            uniqueName: MakeDeterministicUniqueName(m_numAdded++, fbxMaterial.GetName()),
-            uriBase: m_AssetLocation) {
-                BaseColorFactor = unityMaterial.GetColor("_Color"),
-                BaseColorTex = baseColorUri,
-            });
-  }
+            m_MaterialToIem.Add(
+                unityMaterial,
+                new DynamicExportableMaterial(
+                    parent: pbrInfo.descriptor,
+                    durableName: fbxMaterial.GetName(),
+                    uniqueName: MakeDeterministicUniqueName(m_numAdded++, fbxMaterial.GetName()),
+                    uriBase: m_AssetLocation)
+                {
+                    BaseColorFactor = unityMaterial.GetColor("_Color"),
+                    BaseColorTex = baseColorUri,
+                });
+        }
 #endif
+
+        // Used for GLTFast
+        public void Add(Material unityMaterial)
+        {
+            TbtSettings.PbrMaterialInfo pbrInfo = unityMaterial.renderQueue < 3000 // TODO Is this reliable?
+                ? TbtSettings.Instance.m_PbrBlendDoubleSided
+                : TbtSettings.Instance.m_PbrOpaqueDoubleSided;
+
+            Color color = Color.magenta;
+            bool hasColor = false;
+            if (unityMaterial.shader.name.StartsWith("UnityGLTF"))
+            {
+                if (unityMaterial.HasColor("baseColorFactor"))
+                {
+                    color = unityMaterial.GetColor("baseColorFactor");
+                    hasColor = true;
+                }
+            }
+            if (!hasColor)
+            {
+                color = unityMaterial.color;
+            }
+
+            m_MaterialToIem.Add(
+                unityMaterial,
+                new DynamicExportableMaterial(
+                    parent: pbrInfo.descriptor,
+                    durableName: unityMaterial.name,
+                    uniqueName: MakeDeterministicUniqueName(m_numAdded++, unityMaterial.name),
+                    uriBase: m_AssetLocation)
+                {
+                    BaseColorFactor = color
+                });
+        }
 
         // Used for gltf imports
         public void Add(GltfMaterialConverter.UnityMaterial um,

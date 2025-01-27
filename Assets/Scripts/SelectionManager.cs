@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using UnityEngine;
 
@@ -83,6 +84,16 @@ namespace TiltBrush
 
         private bool m_bSelectionWidgetNeedsUpdate;
 
+        [NonSerialized] public bool m_LockTranslationX = false;
+        [NonSerialized] public bool m_LockTranslationY = false;
+        [NonSerialized] public bool m_LockTranslationZ = false;
+        [NonSerialized] public bool m_LockRotationX = false;
+        [NonSerialized] public bool m_LockRotationY = false;
+        [NonSerialized] public bool m_LockRotationZ = false;
+        [NonSerialized] public bool m_EnableSnapTranslationX = true;
+        [NonSerialized] public bool m_EnableSnapTranslationY = true;
+        [NonSerialized] public bool m_EnableSnapTranslationZ = true;
+
         /// Returns true when SelectedStrokes is not empty.
         public bool HasSelection
         {
@@ -107,6 +118,39 @@ namespace TiltBrush
             get
             {
                 return HasSelection;
+            }
+        }
+
+        public bool UngroupingAllowed
+        {
+            get
+            {
+                return SelectionIsInOneGroup || SelectionIsCompositeImport;
+            }
+        }
+
+        public bool SelectionIsCompositeImport
+        {
+            get
+            {
+                if (m_SelectedWidgets.Count != 1) return false;
+                GrabWidget widget = m_SelectedWidgets.First();
+                if (widget is ModelWidget modelWidget)
+                {
+                    return modelWidget.HasSubModels();
+                }
+
+                if (widget is ImageWidget imageWidget)
+                {
+                    string ext = Path.GetExtension(imageWidget.ReferenceImage.FileName).ToLower();
+                    if (ext == ".svg")
+                    {
+                        return imageWidget.HasSubShapes();
+                    }
+                    return false;
+                }
+
+                return false;
             }
         }
 
@@ -424,9 +468,9 @@ namespace TiltBrush
         {
             bool showSelection = ShouldShowSelectedStrokes;
 
-            if (Config.IsExperimental)
+            if (!App.Config.m_UseBatchedBrushes)
             {
-                // Strokes of type BrushStroke currently only exist in experimental builds.
+                // Strokes of type BrushStroke currently only exist when batching is off
                 // The list of selected strokes might be quite long, so we want to avoid iterating it.
                 foreach (Stroke stroke in m_SelectedStrokes)
                 {
@@ -459,7 +503,7 @@ namespace TiltBrush
                 {
                     widget.RegisterHighlight();
                 }
-#if !UNITY_ANDROID
+#if !(UNITY_ANDROID || UNITY_IOS)
                 App.Scene.SelectionCanvas.RegisterHighlight();
 #endif
             }
@@ -823,15 +867,15 @@ namespace TiltBrush
 
         public void InvertSelection()
         {
-            // Build a list of all the strokes in the main canvas.
+            // Build a list of all the strokes in the active canvas.
             List<Stroke> unselectedStrokes =
                 SketchMemoryScript.m_Instance.GetAllUnselectedActiveStrokes();
 
-            // Build a list of all the unpinned widgets in the main canvas.
+            // Build a list of all the unpinned widgets in the active canvas.
             List<GrabWidget> unselectedWidgets =
                 WidgetManager.m_Instance.GetAllUnselectedActiveWidgets();
 
-            // Select everything that was in the main canvas.
+            // Select everything that was in the active canvas.
             SketchMemoryScript.m_Instance.PerformAndRecordCommand(
                 new InvertSelectionCommand(unselectedStrokes, m_SelectedStrokes,
                     unselectedWidgets, m_SelectedWidgets));
@@ -860,11 +904,11 @@ namespace TiltBrush
 
         public void SelectAll()
         {
-            // Build a list of all the strokes in the main canvas.
+            // Build a list of all the strokes in the active canvas.
             List<Stroke> unselectedStrokes =
                 SketchMemoryScript.m_Instance.GetAllUnselectedActiveStrokes();
 
-            // Build a list of all the unpinned widgets in the main canvas.
+            // Build a list of all the unpinned widgets in the active canvas.
             List<GrabWidget> unselectedWidgets =
                 WidgetManager.m_Instance.GetAllUnselectedActiveWidgets();
 
@@ -884,16 +928,24 @@ namespace TiltBrush
                 return;
             }
 
-            // If all the selected strokes are in one group, ungroup by setting the new group to None.
-            // Otherwise, create a new group by setting the target group parameter to null.
-            bool selectionIsInOneGroup = SelectionIsInOneGroup;
-            SketchGroupTag? targetGroup =
-                selectionIsInOneGroup ? SketchGroupTag.None : (SketchGroupTag?)null;
-            SketchMemoryScript.m_Instance.PerformAndRecordCommand(
-                new GroupStrokesAndWidgetsCommand(m_SelectedStrokes, m_SelectedWidgets, targetGroup: targetGroup));
+            if (SelectionIsCompositeImport)
+            {
+                SketchMemoryScript.m_Instance.PerformAndRecordCommand(
+                    new BreakModelApartCommand(m_SelectedWidgets.First() as ModelWidget));
+            }
+            else
+            {
+                // If all the selected strokes are in one group, ungroup by setting the new group to None.
+                // Otherwise, create a new group by setting the target group parameter to null.
+                bool selectionIsInOneGroup = SelectionIsInOneGroup;
+                SketchGroupTag? targetGroup =
+                    selectionIsInOneGroup ? SketchGroupTag.None : (SketchGroupTag?)null;
+                SketchMemoryScript.m_Instance.PerformAndRecordCommand(
+                    new GroupStrokesAndWidgetsCommand(m_SelectedStrokes, m_SelectedWidgets, targetGroup: targetGroup));
 
-            OutputWindowScript.m_Instance.CreateInfoCardAtController(
-                InputManager.ControllerName.Brush, selectionIsInOneGroup ? "Ungrouped!" : "Grouped!");
+                OutputWindowScript.m_Instance.CreateInfoCardAtController(
+                    InputManager.ControllerName.Brush, selectionIsInOneGroup ? "Ungrouped!" : "Grouped!");
+            }
             var pos = InputManager.m_Instance.GetControllerPosition(InputManager.ControllerName.Brush);
             AudioManager.m_Instance.PlayGroupedSound(pos);
         }
@@ -999,10 +1051,32 @@ namespace TiltBrush
             );
         }
 
+        public void SetSnappingAngle(string angleAsString)
+        {
+            int requestedIndex = m_AngleSnaps.Select(x => x.ToString()).ToList().FindIndex(x => x == angleAsString);
+            if (requestedIndex < 0)
+            {
+                Debug.LogWarning($"SetSnappingAngle received an invalid angle of {angleAsString}. Valid values: {string.Join(",", m_AngleSnaps)}");
+                return;
+            }
+            SetSnappingAngle(requestedIndex);
+        }
+
         public void SetSnappingAngle(int snapIndex)
         {
             m_CurrentSnapAngleIndex = snapIndex;
             m_snappingAngle = m_AngleSnaps[snapIndex];
+        }
+
+        public void SetSnappingGridSize(string gridSizeAsString)
+        {
+            int requestedIndex = m_GridSnaps.Select(x => x.ToString()).ToList().FindIndex(x => x == gridSizeAsString);
+            if (requestedIndex < 0)
+            {
+                Debug.LogWarning($"SetSnappingGridSize received an invalid angle of {gridSizeAsString}. Valid values: {string.Join(",", m_GridSnaps)}");
+                return;
+            }
+            SetSnappingGridSize(requestedIndex);
         }
 
         public void SetSnappingGridSize(int snapIndex)
@@ -1023,6 +1097,62 @@ namespace TiltBrush
                 m_SnapGridVisualization.enabled = false;
             }
         }
+
+        public Quaternion QuantizeAngle(Quaternion rotation)
+        {
+            var snapAngle = SnappingAngle;
+            if (snapAngle == 0) return rotation;
+            float round(float val) { return Mathf.Round(val / snapAngle) * snapAngle; }
+            Vector3 euler = rotation.eulerAngles;
+            euler = new Vector3(round(euler.x), round(euler.y), round(euler.z));
+            return Quaternion.Euler(euler);
+        }
+
+        public float ScalarSnap(float val)
+        {
+            if (SnappingGridSize == 0) return val;
+            return Mathf.Round(val / SnappingGridSize) * SnappingGridSize;
+        }
+
+        // All transforms are in canvas space
+        public Vector3 SnapToGrid_CS(Vector3 position)
+        {
+            float gridSize = SnappingGridSize;
+            if (gridSize == 0) return position;
+            float round(float val) { return Mathf.Round(val / gridSize) * gridSize; }
+            Vector3 roundedCanvasPos = new Vector3(
+                m_EnableSnapTranslationX ? round(position.x) : position.x,
+                m_EnableSnapTranslationY ? round(position.y) : position.y,
+                m_EnableSnapTranslationZ ? round(position.z) : position.z
+            );
+            return roundedCanvasPos;
+        }
+
+        // Input is in global space, the snapping is done in canvas space
+        // And the result is returned in global space
+        public Vector3 SnapToGrid_GS(Vector3 position)
+        {
+            float gridSize = SnappingGridSize;
+            if (gridSize == 0) return position;
+            Vector3 localCanvasPos = App.ActiveCanvas.transform.worldToLocalMatrix.MultiplyPoint3x4(position);
+            float round(float val) { return Mathf.Round(val / gridSize) * gridSize; }
+            Vector3 roundedCanvasPos = new Vector3(
+                m_EnableSnapTranslationX ? round(localCanvasPos.x) : localCanvasPos.x,
+                m_EnableSnapTranslationY ? round(localCanvasPos.y) : localCanvasPos.y,
+                m_EnableSnapTranslationZ ? round(localCanvasPos.z) : localCanvasPos.z
+            );
+            return App.ActiveCanvas.transform.localToWorldMatrix.MultiplyPoint3x4(roundedCanvasPos);
+        }
+
+        // Used by align/distribute etc
+        // Controls which widget types should be affected
+        // Currently it's "any subclass of MediaWidget or StencilWidget"
+        public List<GrabWidget> GetValidSelectedWidgets() => SelectedWidgets
+            .Where(widget =>
+                widget.GetType().IsSubclassOf(typeof(MediaWidget)) ||
+                widget.GetType().IsSubclassOf(typeof(StencilWidget))
+            )
+            .ToList();
     }
 
 } // namespace TiltBrush

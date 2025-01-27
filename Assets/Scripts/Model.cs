@@ -19,9 +19,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using TiltBrushToolkit;
+using Unity.VectorGraphics;
 using Debug = UnityEngine.Debug;
 using UObject = UnityEngine.Object;
+
 
 namespace TiltBrush
 {
@@ -43,10 +46,23 @@ namespace TiltBrush
 
             public static Location File(string relativePath)
             {
+                int lastIndex = relativePath.LastIndexOf('#');
+                string path, fragment;
+
+                if (lastIndex == -1)
+                {
+                    path = relativePath;
+                    fragment = null;
+                }
+                else
+                {
+                    path = relativePath.Substring(0, lastIndex);
+                    fragment = relativePath.Substring(lastIndex + 1);
+                }
                 return new Location
                 {
                     type = Type.LocalFile,
-                    path = relativePath
+                    path = path,
                 };
             }
 
@@ -90,6 +106,8 @@ namespace TiltBrush
                 }
             }
 
+            public string Extension => Path.GetExtension(AbsolutePath).ToLower();
+
             public string AssetId
             {
                 get
@@ -108,14 +126,16 @@ namespace TiltBrush
 
             public override string ToString()
             {
+                string str;
                 if (type == Type.PolyAssetId)
                 {
-                    return $"{type}:{id}";
+                    str = $"{type}:{id}";
                 }
                 else
                 {
-                    return $"{type}:{path}";
+                    str = $"{type}:{path}";
                 }
+                return str;
             }
 
             public override bool Equals(object obj)
@@ -224,8 +244,7 @@ namespace TiltBrush
         /// Only allowed if AllowExport = true
         public IExportableMaterial GetExportableMaterial(Material material)
         {
-            // TODO: Maybe throw InvalidOperation if AllowExport==false rather than blowing
-            // up with NullReference?
+            EnsureCollectorExists();
             return m_ImportMaterialCollector.GetExportableMaterial(material);
         }
 
@@ -337,6 +356,10 @@ namespace TiltBrush
                     {
                         return false;
                     }
+                    m_ImportMaterialCollector = new ImportMaterialCollector(
+                        Path.GetDirectoryName(m_localPath),
+                        uniqueSeed: m_localPath
+                    );
                     m_meshEnumerator = enumerable.GetEnumerator();
                     m_root.SetActive(false);
                 }
@@ -407,7 +430,7 @@ namespace TiltBrush
                 var loader = new TiltBrushUriLoader(
                     m_localPath, Path.GetDirectoryName(m_localPath), m_useThreadedImageLoad);
                 var options = m_fromPoly ? kPolyGltfImportOptions : kGltfImportOptions;
-                return ImportGltf.BeginImport(m_localPath, loader, options);
+                return NewGltfImporter.BeginImport(m_localPath);
             }
 
             protected override GameObject DoUnityThreadWork(IDisposable state__,
@@ -420,27 +443,17 @@ namespace TiltBrush
                 GameObject rootObject = null;
                 using (IDisposable state_ = state__)
                 {
-                    var state = state_ as ImportGltf.ImportState;
+                    var state = state_ as NewGltfImporter.ImportState;
                     if (state != null)
                     {
                         string assetLocation = Path.GetDirectoryName(m_localPath);
                         // EndImport doesn't try to use the loadImages functionality of UriLoader anyway.
                         // It knows it's on the main thread, so chooses to use Unity's fast loading.
-                        var loader = new TiltBrushUriLoader(m_localPath, assetLocation, loadImages: false);
-                        ImportGltf.GltfImportResult result =
-                            ImportGltf.EndImport(
-                                state, loader,
-                                new ImportMaterialCollector(assetLocation, uniqueSeed: m_localPath),
-                                out meshEnumerable);
-
-                        if (result != null)
-                        {
-                            rootObject = result.root;
-                            importMaterialCollector = (ImportMaterialCollector)result.materialCollector;
-                        }
+                        rootObject = state.root;
+                        importMaterialCollector = new ImportMaterialCollector(assetLocation, uniqueSeed: m_localPath);
                     }
                 }
-                IsValid = (rootObject != null);
+                IsValid = rootObject != null;
                 return rootObject;
             }
         } // GltfModelBuilder
@@ -448,10 +461,7 @@ namespace TiltBrush
         GameObject LoadUsd(List<string> warnings)
         {
 #if USD_SUPPORTED
-            if (Config.IsExperimental)
-            {
-                return ImportUsd.Import(m_Location.AbsolutePath, out warnings);
-            }
+            return ImportUsd.Import(m_Location.AbsolutePath, out warnings);
 #endif
             m_LoadError = new LoadError("usd not supported");
             return null;
@@ -479,6 +489,28 @@ namespace TiltBrush
 
         }
 
+        GameObject LoadSvg(List<string> warningsOut, out SVGParser.SceneInfo sceneInfo)
+        {
+            try
+            {
+                var reader = new SvgMeshReader(m_Location.AbsolutePath);
+                var (gameObject, warnings, collector, si) = reader.Import();
+                sceneInfo = si;
+                warningsOut.AddRange(warnings);
+                m_ImportMaterialCollector = collector;
+                m_AllowExport = (m_ImportMaterialCollector != null);
+                return gameObject;
+            }
+            catch (Exception ex)
+            {
+                m_LoadError = new LoadError("Invalid data", ex.Message);
+                m_AllowExport = false;
+                Debug.LogException(ex);
+                sceneInfo = new SVGParser.SceneInfo();
+                return null;
+            }
+        }
+
         ///  Load model using FBX SDK.
         GameObject LoadFbx(List<string> warningsOut)
         {
@@ -486,50 +518,46 @@ namespace TiltBrush
             m_LoadError = new LoadError("fbx not supported");
             return null;
 #else
-    try {
-      var reader = new FbxReader(m_Location.AbsolutePath);
-      var (gameObject, warnings, collector) = reader.Import();
-      warningsOut.AddRange(warnings);
-      m_ImportMaterialCollector = collector;
-      m_AllowExport = (m_ImportMaterialCollector != null);
-      return gameObject;
-    } catch (Exception ex) {
-      m_LoadError = new LoadError("Invalid data", ex.Message);
-      m_AllowExport = false;
-      Debug.LogException(ex);
-      return null;
-    }
-#endif
-        }
-
-        GameObject LoadGltf(List<string> warnings)
-        {
-            // This is intended to be identical to using GltfModelBuilder, except synchronous.
-            GameObject go;
-            bool fromPoly = (m_Location.GetLocationType() == Location.Type.PolyAssetId);
-            string localPath = m_Location.AbsolutePath;
-            string assetLocation = Path.GetDirectoryName(localPath);
-            // Synchronous, so don't use slow image loading
-            var loader = new TiltBrushUriLoader(localPath, assetLocation, loadImages: false);
             try
             {
-                ImportGltf.GltfImportResult result = ImportGltf.Import(
-                    localPath, loader,
-                    new ImportMaterialCollector(assetLocation, uniqueSeed: localPath),
-                    fromPoly ? kPolyGltfImportOptions : kGltfImportOptions);
-                go = result.root;
-                m_ImportMaterialCollector = (ImportMaterialCollector)result.materialCollector;
+                var reader = new FbxReader(m_Location.AbsolutePath);
+                var (gameObject, warnings, collector) = reader.Import();
+                warningsOut.AddRange(warnings);
+                m_ImportMaterialCollector = collector;
+                m_AllowExport = (m_ImportMaterialCollector != null);
+                return gameObject;
             }
             catch (Exception ex)
             {
                 m_LoadError = new LoadError("Invalid data", ex.Message);
-                go = null;
                 m_AllowExport = false;
                 Debug.LogException(ex);
+                return null;
             }
+#endif
+        }
 
-            m_AllowExport = (go != null);
-            return go;
+        async Task LoadGltf(List<string> warnings)
+        {
+            string localPath = m_Location.AbsolutePath;
+            string assetLocation = Path.GetDirectoryName(localPath);
+            try
+            {
+                Task t = NewGltfImporter.StartSyncImport(
+                    localPath,
+                    assetLocation,
+                    this,
+                    warnings
+                );
+                m_AllowExport = true;
+                await t;
+            }
+            catch (Exception ex)
+            {
+                m_AllowExport = false;
+                m_LoadError = new LoadError("Invalid data", ex.Message);
+                Debug.LogException(ex);
+            }
         }
 
         private ModelBuilder m_builder;
@@ -554,13 +582,13 @@ namespace TiltBrush
 
             bool allowUsd = false;
 #if USD_SUPPORTED
-            allowUsd = Config.IsExperimental;
+            allowUsd = true;
 #endif
 
             // Experimental usd loading.
             if (allowUsd &&
                 m_Location.GetLocationType() == Location.Type.LocalFile &&
-                Path.GetExtension(m_Location.AbsolutePath).ToLower().StartsWith(".usd"))
+                m_Location.Extension == ".usd")
             {
                 throw new NotImplementedException();
             }
@@ -627,17 +655,26 @@ namespace TiltBrush
             else
             {
                 m_AllowExport = go != null;
-                CreatePrefab(go);
+                StartCreatePrefab(go);
             }
+
+            AssignMaterialsToCollector(m_ImportMaterialCollector);
 
             // Even if an exception occurs above, return true because the return value indicates async load
             // is complete.
             return true;
         }
 
+        public async Task LoadModelAsync()
+        {
+            Task t = StartCreatePrefab(null);
+            await t;
+
+        }
         public void LoadModel()
         {
-            CreatePrefab(null);
+            StartCreatePrefab(null);
+
         }
 
         /// Either synchronously load a GameObject hierarchy and convert it to a "prefab"
@@ -649,7 +686,7 @@ namespace TiltBrush
         /// - Its transform is identity
         /// - Every visible mesh also has a BoxCollider
         /// - Every BoxCollider also has a visible mesh
-        private void CreatePrefab(GameObject go)
+        private async Task StartCreatePrefab(GameObject go)
         {
             if (m_Valid)
             {
@@ -667,26 +704,40 @@ namespace TiltBrush
                 // and bail at a higher level, and require as a precondition that error == null
                 m_LoadError = null;
 
-                string ext = Path.GetExtension(m_Location.AbsolutePath).ToLower();
+                string ext = m_Location.Extension;
                 if (m_Location.GetLocationType() == Location.Type.LocalFile &&
-                    ext.StartsWith(".usd"))
+                    ext == ".usd")
                 {
                     // Experimental usd loading.
                     go = LoadUsd(warnings);
+                    CalcBoundsNonGltf(go);
+                    EndCreatePrefab(go, warnings);
                 }
                 else if (m_Location.GetLocationType() == Location.Type.PolyAssetId ||
                     ext == ".gltf2" || ext == ".gltf" || ext == ".glb")
                 {
                     // If we pulled this from Poly, it's going to be a gltf file.
-                    go = LoadGltf(warnings);
+                    Task t = LoadGltf(warnings);
+                    await t;
                 }
                 else if (ext == ".fbx" || ext == ".obj")
                 {
                     go = LoadFbx(warnings);
+                    CalcBoundsNonGltf(go);
+                    EndCreatePrefab(go, warnings);
                 }
                 else if (ext == ".ply")
                 {
                     go = LoadPly(warnings);
+                    CalcBoundsNonGltf(go);
+                    EndCreatePrefab(go, warnings);
+                }
+                else if (ext == ".svg")
+                {
+                    go = LoadSvg(warnings, out SVGParser.SceneInfo sceneInfo);
+                    CalcBoundsNonGltf(go);
+                    EndCreatePrefab(go, warnings);
+                    go.GetComponent<ObjModelScript>().SvgSceneInfo = sceneInfo;
                 }
                 else
                 {
@@ -694,57 +745,90 @@ namespace TiltBrush
                 }
             }
 
+        }
+
+        public void CalcBoundsGltf(GameObject go)
+        {
+            Bounds b = new Bounds();
+            bool first = true;
+            var boundsList = go.GetComponentsInChildren<MeshRenderer>().Select(x => x.bounds).ToList();
+            var skinnedMeshRenderers = go.GetComponentsInChildren<SkinnedMeshRenderer>();
+            boundsList.AddRange(skinnedMeshRenderers.Select(x => x.bounds));
+            foreach (Bounds bounds in boundsList)
+            {
+                if (first)
+                {
+                    b = bounds;
+                    first = false;
+                }
+                else
+                {
+                    b.Encapsulate(bounds);
+                }
+            }
+            m_MeshBounds = b;
+            if (first)
+            {
+                // There was no geometry
+                Debug.LogErrorFormat("No usable geometry in model. LoadModel({0})", go.name);
+            }
+        }
+
+        private void CalcBoundsNonGltf(GameObject go)
+        {
+            // TODO: this list of colliders is assumed to match the modelScript.m_MeshChildren array
+            // This should be enforced.
+
+            // bc.bounds is world-space; therefore this calculation requires that
+            // go.transform be identity
+            Debug.Assert(Coords.AsGlobal[go.transform] == TrTransform.identity);
+            Bounds b = new Bounds();
+            bool first = true;
+            foreach (BoxCollider bc in go.GetComponentsInChildren<BoxCollider>())
+            {
+                if (first)
+                {
+                    b = new Bounds(bc.bounds.center, bc.bounds.size);
+                    first = false;
+                }
+                else
+                {
+                    b.Encapsulate(bc.bounds);
+                }
+                UnityEngine.Object.Destroy(bc);
+            }
+            m_MeshBounds = b;
+            if (first)
+            {
+                // There was no geometry
+                Debug.LogErrorFormat("No usable geometry in model. LoadModel({0})", go.name);
+            }
+
+        }
+
+        public void EndCreatePrefab(GameObject go, List<string> warnings)
+        {
             if (go == null)
             {
                 m_LoadError = m_LoadError ?? new LoadError("Bad data");
                 DisplayWarnings(warnings);
             }
-            else
+
+            // Adopt the GameObject
+            go.name = m_Location.ToString();
+            go.AddComponent<ObjModelScript>().Init();
+            go.SetActive(false);
+            if (m_ModelParent != null)
             {
-                // TODO: this list of colliders is assumed to match the modelScript.m_MeshChildren array
-                // This should be enforced.
-
-                // bc.bounds is world-space; therefore this calculation requires that
-                // go.transform be identity
-                Debug.Assert(Coords.AsGlobal[go.transform] == TrTransform.identity);
-                Bounds b = new Bounds();
-                bool first = true;
-                foreach (BoxCollider bc in go.GetComponentsInChildren<BoxCollider>())
-                {
-                    if (first)
-                    {
-                        b = new Bounds(bc.bounds.center, bc.bounds.size);
-                        first = false;
-                    }
-                    else
-                    {
-                        b.Encapsulate(bc.bounds);
-                    }
-                    UnityEngine.Object.Destroy(bc);
-                }
-                m_MeshBounds = b;
-
-                if (first)
-                {
-                    // There was no geometry
-                    Debug.LogErrorFormat("No usable geometry in model. LoadModel({0})", go.name);
-                }
-
-                // Adopt the GameObject
-                go.name = m_Location.ToString();
-                go.AddComponent<ObjModelScript>().Init();
-                go.SetActive(false);
-                if (m_ModelParent != null)
-                {
-                    UnityEngine.Object.Destroy(m_ModelParent.gameObject);
-                }
-                m_ModelParent = go.transform;
-
-                // !!! Add to material dictionary here?
-
-                m_Valid = true;
-                DisplayWarnings(warnings);
+                UnityEngine.Object.Destroy(m_ModelParent.gameObject);
             }
+            m_ModelParent = go.transform;
+
+            // !!! Add to material dictionary here?
+
+            m_Valid = true;
+            DisplayWarnings(warnings);
+
         }
 
         public void UnloadModel()
@@ -849,5 +933,29 @@ namespace TiltBrush
             return "Unknown";
         }
 
+        public void AssignMaterialsToCollector(ImportMaterialCollector collector)
+        {
+            m_ImportMaterialCollector = collector;
+            foreach (var mf in GetMeshes())
+            {
+                foreach (var unityMat in mf.GetComponent<MeshRenderer>().materials)
+                {
+                    m_ImportMaterialCollector.Add(unityMat);
+                }
+            }
+        }
+
+        public void EnsureCollectorExists()
+        {
+            if (m_ImportMaterialCollector == null)
+            {
+                var localPath = GetLocation().AbsolutePath;
+                m_ImportMaterialCollector = new ImportMaterialCollector(
+                    Path.GetDirectoryName(localPath),
+                    uniqueSeed: localPath
+                );
+                AssignMaterialsToCollector(m_ImportMaterialCollector);
+            }
+        }
     }
 } // namespace TiltBrush;

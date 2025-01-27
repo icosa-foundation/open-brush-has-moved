@@ -40,7 +40,7 @@ namespace TiltBrush
             SketchControlsScript.m_Instance.IssueGlobalCommand(rEnum, 1);
         }
 
-        // TODO 
+        // TODO
         // [ApiEndpoint("upload", "Saves the current scene and uploads it to Poly/Icosa")]
         // public static void SaveAndUpload()
         // {
@@ -113,6 +113,7 @@ namespace TiltBrush
                 -1,
                 Path.Combine(App.UserSketchPath(), filename)
             );
+            PanelManager.m_Instance.ToggleSketchbookPanels(true);
         }
 
         [ApiEndpoint("merge.named", "Loads the sketch with the given name from the user's sketch folder")]
@@ -142,10 +143,10 @@ namespace TiltBrush
             SketchControlsScript.m_Instance.IssueGlobalCommand(rEnum);
         }
 
-        [ApiEndpoint("symmetry.doublemirror", "Sets the symmetry mode to 'double mirror'")]
-        public static void SymmetryFour()
+        [ApiEndpoint("symmetry.multimirror", "Sets the symmetry mode to 'multimirror'")]
+        public static void MultiMirror()
         {
-            var rEnum = SketchControlsScript.GlobalCommands.SymmetryFour;
+            var rEnum = SketchControlsScript.GlobalCommands.MultiMirror;
             SketchControlsScript.m_Instance.IssueGlobalCommand(rEnum);
         }
 
@@ -354,16 +355,21 @@ namespace TiltBrush
         //     SketchControlsScript.m_Instance.IssueGlobalCommand(rEnum, iParam1);
         // }
 
-        // TODO Test this
-        [ApiEndpoint("selection.duplicate", "Create a duplicate of the current selection")]
-        public static void Duplicate()
+        [ApiEndpoint("selection.duplicate", "Create a duplicate of the current selection (uses symmetry mirrors if active")]
+        public static void DuplicateSelection()
         {
             var rEnum = SketchControlsScript.GlobalCommands.Duplicate;
             SketchControlsScript.m_Instance.IssueGlobalCommand(rEnum);
         }
 
+        [ApiEndpoint("selection.delete", "Deletes the current selection")]
+        public static void DeleteSelection()
+        {
+            SelectionManager.m_Instance.DeleteSelection();
+        }
+
         // TODO explicit group/ungroup
-        [ApiEndpoint("selection.group", "Groups the current selection")]
+        [ApiEndpoint("selection.group", "Groups (or ungroups) the current selection")]
         public static void ToggleGroupStrokesAndWidgets()
         {
             var rEnum = SketchControlsScript.GlobalCommands.ToggleGroupStrokesAndWidgets;
@@ -436,6 +442,12 @@ namespace TiltBrush
         {
             var rEnum = SketchControlsScript.GlobalCommands.SelectAll;
             SketchControlsScript.m_Instance.IssueGlobalCommand(rEnum);
+        }
+
+        [ApiEndpoint("select.none", "Deselects all strokes and widgets in the scene")]
+        public static void SelectNone()
+        {
+            SelectionManager.m_Instance.ClearActiveSelection();
         }
 
         [ApiEndpoint("selection.flip", "Mirrors the current selection")]

@@ -12,23 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using UnityEngine;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using UnityEngine;
+using TMPro;
 
 namespace TiltBrush
 {
     public class ReferencePanel : ModalPanel
     {
         [Header("Reference Panel")]
-        [SerializeField] private TextMesh m_PanelText;
+        [SerializeField] private TextMeshPro m_PanelText;
         [SerializeField] private GameObject m_NoData;
         [SerializeField] private Texture2D m_UnknownImageTexture;
         [SerializeField] private ReferencePanelTab[] m_Tabs;
         [SerializeField] private MeshRenderer[] m_ExtraBorders;
         [SerializeField] private GameObject m_RefreshingSpinner;
+        [SerializeField] private TextOptionButton m_DirectoryChooserPopupButton;
+        [SerializeField] private ActionButton m_DirectoryHomeButton;
+        [SerializeField] private ActionButton m_DirectoryUpButton;
+        [SerializeField] private TextMeshPro m_InfoText;
         private ReferencePanelTab m_CurrentTab;
         private int m_EnabledCount = 0;
+        private string[] m_CurrentSubdirectories;
+        private bool m_FolderNavButtonsNeedUpdate;
+
+        public string[] CurrentSubdirectories => m_CurrentSubdirectories;
 
         public Texture2D UnknownImageTexture
         {
@@ -48,6 +58,7 @@ namespace TiltBrush
                 return m_CurrentTab.Buttons;
             }
         }
+        public ReferencePanelTab CurrentTab => m_CurrentTab;
 
         public override bool IsInButtonMode(ModeButton button)
         {
@@ -101,6 +112,12 @@ namespace TiltBrush
             if (m_RefreshingSpinner != null)
             {
                 m_RefreshingSpinner.SetActive(m_CurrentTab != null && m_CurrentTab.Catalog.IsScanning);
+            }
+
+            if (m_FolderNavButtonsNeedUpdate)
+            {
+                UpdateNavButtonState();
+                m_FolderNavButtonsNeedUpdate = false;
             }
         }
 
@@ -203,9 +220,62 @@ namespace TiltBrush
             }
             m_NumPages = m_CurrentTab.PageCount;
 
-            m_NoData.gameObject.SetActive(m_CurrentTab.Catalog.ItemCount == 0);
+            string currentDir = m_CurrentTab.ReferenceButtonType switch
+            {
+                ReferenceButton.Type.Images => ReferenceImageCatalog.m_Instance.CurrentImagesDirectory,
+                ReferenceButton.Type.BackgroundImages => BackgroundImageCatalog.m_Instance.CurrentBackgroundImagesDirectory,
+                ReferenceButton.Type.Models => ModelCatalog.m_Instance.CurrentModelsDirectory,
+                ReferenceButton.Type.Videos => VideoCatalog.Instance.CurrentVideoDirectory
+            };
+
+            var truncatedPath = currentDir.Substring(App.MediaLibraryPath().Length);
+            if (m_DirectoryChooserPopupButton != null)
+            {
+                m_DirectoryChooserPopupButton.ButtonLabel = $"{truncatedPath}";
+                m_CurrentSubdirectories = Directory.GetDirectories(currentDir);
+            }
 
             base.RefreshPage();
+            m_FolderNavButtonsNeedUpdate = m_DirectoryChooserPopupButton != null;
+            UpdateInfoText();
+        }
+
+        private void UpdateNavButtonState()
+        {
+            if (m_CurrentTab.Catalog.IsSubDirectoryOfHome() && !m_CurrentTab.Catalog.IsHomeDirectory())
+            {
+                m_DirectoryHomeButton.SetButtonAvailable(true);
+                m_DirectoryUpButton.SetButtonAvailable(true);
+
+                m_DirectoryHomeButton.SetDescriptionUnavailable(false);
+                m_DirectoryUpButton.SetDescriptionUnavailable(false);
+            }
+            else
+            {
+                m_DirectoryHomeButton.SetButtonAvailable(false);
+                m_DirectoryUpButton.SetButtonAvailable(false);
+
+                m_DirectoryHomeButton.SetDescriptionUnavailable(true);
+                m_DirectoryUpButton.SetDescriptionUnavailable(true);
+            }
+
+            if (m_CurrentSubdirectories.Length == 0)
+            {
+                m_DirectoryChooserPopupButton.SetButtonAvailable(false);
+                m_DirectoryChooserPopupButton.SetDescriptionUnavailable(true);
+            }
+            else
+            {
+                m_DirectoryChooserPopupButton.SetButtonAvailable(true);
+                m_DirectoryChooserPopupButton.SetDescriptionUnavailable(false);
+            }
+
+            // Only show for truly empty home directory
+            m_NoData.gameObject.SetActive(
+                m_CurrentTab.Catalog.IsHomeDirectory() &&
+                m_CurrentTab.Catalog.ItemCount == 0 &&
+                m_CurrentSubdirectories.Length == 0
+            );
         }
 
         void OnCatalogChanged()
@@ -237,5 +307,40 @@ namespace TiltBrush
             return m_CurrentTab.RaycastAgainstMeshCollider(ray, out hitInfo, dist);
         }
 
+        public void ChangeDirectoryForCurrentTab(string path)
+        {
+            m_CurrentTab.PageIndex = 0;
+            GotoPage(m_CurrentTab.PageIndex);
+            m_CurrentTab.Catalog.ChangeDirectory(path);
+        }
+
+        private void UpdateInfoText()
+        {
+            if (m_InfoText != null)
+            {
+                // TODO localize
+                m_InfoText.text = $"{m_CurrentTab.Catalog.ItemCount} Files {m_CurrentSubdirectories.Length} Subfolders";
+            }
+        }
+
+        public void ChangeRelativeFolderForCurrentTab(string relativePath)
+        {
+            var path = Path.Join(m_CurrentTab.Catalog.HomeDirectory, relativePath);
+            ChangeDirectoryForCurrentTab(path);
+        }
+
+        public void HomeFolderForCurrentTab(string path)
+        {
+            ChangeDirectoryForCurrentTab(m_CurrentTab.Catalog.HomeDirectory);
+        }
+
+        public void NavigateUpForCurrentTab()
+        {
+            if (m_CurrentTab.Catalog.IsSubDirectoryOfHome() && !m_CurrentTab.Catalog.IsHomeDirectory())
+            {
+                var currentDir = new DirectoryInfo(m_CurrentTab.Catalog.GetCurrentDirectory());
+                ChangeDirectoryForCurrentTab(currentDir.Parent.FullName);
+            }
+        }
     }
 } // namespace TiltBrush

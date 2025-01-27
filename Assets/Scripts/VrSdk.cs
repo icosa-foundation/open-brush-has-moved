@@ -11,11 +11,19 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#if OCULUS_SUPPORTED || ZAPBOX_SUPPORTED
+#define PASSTHROUGH_SUPPORTED
+#endif
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.XR;
+using UnityEngine.XR.Management;
+using InputDevice = UnityEngine.XR.InputDevice;
 
 #if PICO_SUPPORTED
 using PicoInput = Unity.XR.PXR.PXR_Input;
@@ -39,7 +47,8 @@ namespace TiltBrush
         LogitechPen,
         Cosmos,
         Neo3,
-        Phoenix
+        Phoenix,
+        Zapbox,
     }
 
     //
@@ -67,6 +76,7 @@ namespace TiltBrush
         [SerializeField] private GameObject m_UnityXRCosmosControlsPrefab;
         [SerializeField] private GameObject m_UnityXRNeo3ControlsPrefab;
         [SerializeField] private GameObject m_UnityXRPhoenixControlsPrefab;
+        [SerializeField] private GameObject m_UnityXRZapboxControlsPrefab;
         // Prefab for the old-style Touch controllers, used only for Rift
         [SerializeField] private GameObject m_OculusRiftControlsPrefab;
         // Prefab for the new-style Touch controllers, used for Rift-S and Quest
@@ -83,7 +93,9 @@ namespace TiltBrush
         //    out of date for a frame when controllers change.
         private VrControllers m_VrControls;
         public VrControllers VrControls { get { return m_VrControls; } }
-
+#if OCULUS_SUPPORTED
+        [NonSerialized] public OVRManager m_OvrManager;
+#endif
         private bool m_HasVrFocus = true;
 
         private Bounds? m_RoomBoundsAabbCached;
@@ -123,12 +135,31 @@ namespace TiltBrush
 
         void Awake()
         {
+            bool forceMonoscopic =
+                App.UserConfig.Flags.EnableMonoscopicMode ||
+                Keyboard.current[Key.M].isPressed;
+
+            bool disableXr = App.UserConfig.Flags.DisableXrMode ||
+                Keyboard.current[Key.D].isPressed;
+
+            // Allow forcing of monoscopic mode even if launching in XR
+            if (forceMonoscopic && !(App.Config.m_SdkMode == SdkMode.Ods))
+            {
+                App.Config.m_SdkMode = SdkMode.Monoscopic;
+            }
+            else if (!disableXr)
+            {
+                // We no longer initialize XR SDKs automatically
+                // so we need to do it manually
+                Initialize();
+            }
+
             if (App.Config.m_SdkMode == SdkMode.UnityXR)
             {
                 InputDevices.deviceConnected += OnUnityXRDeviceConnected;
                 InputDevices.deviceDisconnected += OnUnityXRDeviceDisconnected;
 
-                // TODO:Mike - We need to set a controller style, is it best here or is it best later when controllers register themselves?
+                // TODO:Mikesky - We need to set a controller style, is it best here or is it best later when controllers register themselves?
                 // Does this entire system need a rethink for the 'modularity' of the XR subsystem?
                 InputDevice tryGetUnityXRController = InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
                 if (!tryGetUnityXRController.isValid)
@@ -168,14 +199,17 @@ namespace TiltBrush
             m_VrCamera.gameObject.SetActive(true);
             m_VrSystem.SetActive(m_VrCamera.gameObject.activeSelf);
 
+            // Skip the rest of the VR setup if we're not using XR
+            if (App.UserConfig.Flags.DisableXrMode || App.UserConfig.Flags.EnableMonoscopicMode) return;
+
 #if OCULUS_SUPPORTED
             // ---------------------------------------------------------------------------------------- //
             // OculusVR
             // ---------------------------------------------------------------------------------------- //
-            OVRManager manager = gameObject.AddComponent<OVRManager>();
-            manager.trackingOriginType = OVRManager.TrackingOrigin.FloorLevel;
-            manager.useRecommendedMSAALevel = false;
-            manager.isInsightPassthroughEnabled = true;
+            m_OvrManager = gameObject.AddComponent<OVRManager>();
+            m_OvrManager.trackingOriginType = OVRManager.TrackingOrigin.Stage;
+            m_OvrManager.useRecommendedMSAALevel = false;
+            m_OvrManager.isInsightPassthroughEnabled = true;
 
             // adding components to the VR Camera needed for fading view and getting controller poses.
             m_VrCamera.gameObject.AddComponent<OculusCameraFade>();
@@ -184,6 +218,21 @@ namespace TiltBrush
             var cameraRig = m_VrSystem.AddComponent<OVRCameraRig>();
             //Disable the OVRCameraRig's eye cameras, since Open Brush already has its own.
             cameraRig.disableEyeAnchorCameras = true;
+
+            //Get Oculus ID
+            var appId = App.Config.OculusSecrets.ClientId;
+#if UNITY_ANDROID
+            appId = App.Config.OculusMobileSecrets.ClientId;
+#endif
+
+            if (Unity.XR.Oculus.Utils.GetSystemHeadsetType() != Unity.XR.Oculus.SystemHeadset.Oculus_Quest)
+            {
+                Oculus.Platform.Core.Initialize(appId);
+                Oculus.Platform.UserAgeCategory.Get().OnComplete((msg) => {
+                    var unused = msg.Data.AgeCategory;
+                });
+            }
+
 #endif // OCULUS_SUPPORTED
 
 #if PIMAX_SUPPORTED
@@ -231,6 +280,8 @@ namespace TiltBrush
                 Application.onBeforeRender -= OnNewPoses;
                 InputDevices.deviceConnected -= OnUnityXRDeviceConnected;
                 InputDevices.deviceDisconnected -= OnUnityXRDeviceDisconnected;
+                XRGeneralSettings.Instance?.Manager?.StopSubsystems();
+                XRGeneralSettings.Instance?.Manager?.DeinitializeLoader();
             }
         }
 
@@ -323,8 +374,10 @@ namespace TiltBrush
 #if OCULUS_SUPPORTED
                 // N points, clockwise winding (but axis is undocumented), undocumented convexity
                 // In practice, it's clockwise looking along Y-
-                points_RS = OVRManager.boundary.GetGeometry(OVRBoundary.BoundaryType.OuterBoundary)
-                    .Select(v => UnityFromOculus(v)).ToArray();
+                points_RS = OVRManager.boundary
+                    ?.GetGeometry(OVRBoundary.BoundaryType.OuterBoundary)
+                    ?.Select(v => UnityFromOculus(v))
+                    .ToArray();
 #else // OCULUS_SUPPORTED
             // if (App.Config.m_SdkMode == SdkMode.SteamVR)
             // {
@@ -396,7 +449,7 @@ namespace TiltBrush
             return true;
         }
 
-        // TODO:Mike - This function is only used in SteamVR's version of RefreshRoomBoundsCache
+        // TODO:Mikesky - This function is only used in SteamVR's version of RefreshRoomBoundsCache
         // /// Converts from SteamVR axis conventions and units to Unity
         // static private Vector3 UnityFromSteamVr(HmdVector3_t v)
         // {
@@ -427,7 +480,8 @@ namespace TiltBrush
                 style == ControllerStyle.Knuckles ||
                 style == ControllerStyle.Cosmos ||
                 style == ControllerStyle.Neo3 ||
-                style == ControllerStyle.Phoenix;
+                style == ControllerStyle.Phoenix ||
+                style == ControllerStyle.Zapbox;
         }
 
         // Destroy and recreate the ControllerBehavior and ControllerGeometry objects.
@@ -485,7 +539,7 @@ namespace TiltBrush
                     break;
                 case ControllerStyle.OculusTouch:
                     {
-                        // TODO:Mike - comment below is correct, this won't work!
+                        // TODO:Mikesky - comment below is correct, this won't work!
                         // Need a new way to detect between the different headsets.
                         // Note that other controllers that match the touch controller profile
                         // register as OculusTouch, so will fall into the same loop here.
@@ -512,6 +566,9 @@ namespace TiltBrush
                     break;
                 case ControllerStyle.Phoenix:
                     controlsPrefab = m_UnityXRPhoenixControlsPrefab;
+                    break;
+                case ControllerStyle.Zapbox:
+                    controlsPrefab = m_UnityXRZapboxControlsPrefab;
                     break;
                 case ControllerStyle.Gvr:
                     controlsPrefab = m_GvrPointerControlsPrefab;
@@ -559,11 +616,11 @@ namespace TiltBrush
         {
             // if (App.Config.m_SdkMode == SdkMode.SteamVR)
             // {
-            //     // TODO:Mike - set to return the default instead.
+            //     // TODO:Mikesky - set to return the default instead.
             //     return new NonVrControllerInfo(behavior);
             //     //return new SteamControllerInfo(behavior);
             // }
-            // else 
+            // else
             if (App.Config.m_SdkMode == SdkMode.UnityXR)
             {
                 return new UnityXRControllerInfo(behavior, isLeftHand);
@@ -587,7 +644,7 @@ namespace TiltBrush
         {
             bool leftRightSwapped = true;
 
-            // TODO:Mike - swapping controller hands in. The Oculus specific stuff might actually be better than SteamVR here? See main branch.
+            // TODO:Mikesky - swapping controller hands in. The Oculus specific stuff might actually be better than SteamVR here? See main branch.
             if (App.Config.m_SdkMode == SdkMode.UnityXR)
             {
                 UnityXRControllerInfo wandInfo = InputManager.Wand as UnityXRControllerInfo;
@@ -684,6 +741,10 @@ namespace TiltBrush
             {
                 SetControllerStyle(ControllerStyle.Wmr);
             }
+            else if (device.name.StartsWith("HP Reverb G2 Controller"))
+            {
+                SetControllerStyle(ControllerStyle.Wmr);
+            }
             else if (device.name.Contains("PICO Controller"))
             {
                 // Controller name isn't specified in Pico's device layout
@@ -702,6 +763,10 @@ namespace TiltBrush
                         break;
                 }
 #endif
+            }
+            else if (device.name.StartsWith("Zapbox"))
+            {
+                SetControllerStyle(ControllerStyle.Zapbox);
             }
             else
             {
@@ -735,12 +800,15 @@ namespace TiltBrush
 
         // Returns false if SDK Mode uses an HMD, but it is not initialized.
         // Retruns true if SDK does not have an HMD or if it is correctly initialized.
+        // Monoscopic mode returns true for some reason
+        // but we make use of this to trigger the view-only mode so if that's ever fixed
+        // we need to also fix the conditions for triggering view-only mode
         public bool IsHmdInitialized()
         {
             switch (App.Config.m_SdkMode)
             {
                 case SdkMode.UnityXR:
-                    return UnityEngine.XR.Management.XRGeneralSettings.Instance.Manager.activeLoader != null;
+                    return XRGeneralSettings.Instance?.Manager?.activeLoader != null;
                 default:
                     return true;
             }
@@ -864,6 +932,15 @@ namespace TiltBrush
                 OVRManager.gpuLevel = level;
             }
 #endif // OCULUS_SUPPORTED
+        }
+
+        public void Initialize()
+        {
+            // Null checks are for Linux view mode
+            // TODO: Need to investigate exactly why Linux hits an NRE here
+            // When other platforms don't
+            XRGeneralSettings.Instance?.Manager?.InitializeLoaderSync();
+            XRGeneralSettings.Instance?.Manager?.StartSubsystems();
         }
     }
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using UnityEngine;
+using UnityEngine.Localization;
 
 namespace TiltBrush
 {
@@ -42,9 +43,10 @@ namespace TiltBrush
         [SerializeField] GameObject m_MemoryWarning;
         [SerializeField] GameObject m_MemoryWarningButton;
         [SerializeField] Color m_MemoryWarningColor;
+        [SerializeField] GameObject m_MultiplayerButton;
         [SerializeField] float m_ButtonRotationAngle = 45f;
 
-        [SerializeField] string m_ShareButtonLoggedOutExtraText;
+        [SerializeField] LocalizedString m_ShareButtonLoggedOutExtraText;
 
         [SerializeField] HintObjectScript m_AdvancedModeHintObject;
 
@@ -62,7 +64,7 @@ namespace TiltBrush
             if (currentLoggedIn == m_UpdateShareButtonState) { return; }
             m_UpdateShareButtonState = currentLoggedIn;
 
-            string text = currentLoggedIn ? "" : m_ShareButtonLoggedOutExtraText;
+            string text = currentLoggedIn ? "" : m_ShareButtonLoggedOutExtraText.GetLocalizedStringAsync().Result;
             m_ShareButton.SetExtraDescriptionText(text);
         }
 

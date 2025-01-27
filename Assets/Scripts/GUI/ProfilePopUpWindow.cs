@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using UnityEngine;
+using TMPro;
 
 namespace TiltBrush
 {
@@ -27,6 +28,7 @@ namespace TiltBrush
             DriveHelp,
             SketchfabHelp,
             ConfirmLogin,
+            Unavailable,
         }
 
         [SerializeField] private GameObject m_GoogleSignedInElements;
@@ -37,8 +39,8 @@ namespace TiltBrush
         [SerializeField] private GameObject m_SketchfabConfirmSignOutElements;
         [SerializeField] private Renderer m_GooglePhoto;
         [SerializeField] private Renderer m_SketchfabPhoto;
-        [SerializeField] private TMPro.TextMeshPro m_GoogleNameText;
-        [SerializeField] private TMPro.TextMeshPro m_SketchfabNameText;
+        [SerializeField] private TextMeshPro m_GoogleNameText;
+        [SerializeField] private TextMeshPro m_SketchfabNameText;
         [SerializeField] private Texture2D m_GenericPhoto;
 
         [SerializeField] private GameObject m_Accounts;
@@ -46,6 +48,7 @@ namespace TiltBrush
         [SerializeField] private GameObject m_GoogleInfoElements;
         [SerializeField] private GameObject m_DriveInfoElements;
         [SerializeField] private GameObject m_SketchfabInfoElements;
+        [SerializeField] private GameObject m_UnavailableElements;
 
         [SerializeField] private GameObject m_DriveSyncEnabledElements;
         [SerializeField] private GameObject m_DriveSyncDisabledElements;
@@ -57,7 +60,7 @@ namespace TiltBrush
 
         [SerializeField] private GameObject m_BackupCompleteElements;
         [SerializeField] private GameObject m_BackingUpElements;
-        [SerializeField] private TextMesh m_BackingUpProgress;
+        [SerializeField] private TextMeshPro m_BackingUpProgress;
 
         [Header("Mobile State Members")]
         [SerializeField] private GameObject m_ConfirmLoginElements;
@@ -77,6 +80,12 @@ namespace TiltBrush
             OAuth2Identity.ProfileUpdated += OnProfileUpdated;
             RefreshObjects();
             App.DriveAccess.RefreshFreeSpaceAsync().AsAsyncVoid();
+
+            // TODO: Make configurable by secrets/login data available at runtime.
+            if (App.Config.DisableAccountLogins)
+            {
+                UpdateMode(Mode.Unavailable);
+            }
         }
 
         void OnDestroy()
@@ -155,6 +164,7 @@ namespace TiltBrush
             m_GoogleInfoElements.SetActive(m_CurrentMode == Mode.GoogleHelp);
             m_DriveInfoElements.SetActive(m_CurrentMode == Mode.DriveHelp);
             m_SketchfabInfoElements.SetActive(m_CurrentMode == Mode.SketchfabHelp);
+            m_UnavailableElements.SetActive(m_CurrentMode == Mode.Unavailable);
             if (m_ConfirmLoginElements != null)
             {
                 m_ConfirmLoginElements.SetActive(m_CurrentMode == Mode.ConfirmLogin);

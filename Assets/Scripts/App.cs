@@ -22,6 +22,8 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using UnityEngine;
 using Newtonsoft.Json;
+using TMPro;
+using UnityEngine.Serialization;
 #if USD_SUPPORTED
 using Unity.Formats.USD;
 #endif
@@ -57,18 +59,21 @@ namespace TiltBrush
         // want to have a different config file for your edition of the app.
         public const string kConfigFileName = "Open Brush.cfg";
         // The name of the App folder (In the user's Documents folder) - original Tilt Brush used "Tilt Brush"
-        // If you are forking Open Brush, you may want to leave this as "Open Brush" or not. 
+        // If you are forking Open Brush, you may want to leave this as "Open Brush" or not.
         public const string kAppFolderName = "Open Brush";
         // The data folder used on Google Drive.
         public const string kDriveFolderName = kAppDisplayName;
 
         public const string kPlayerPrefHasPlayedBefore = "Has played before";
         public const string kReferenceImagesSeeded = "Reference Images seeded";
+        public const string kBackgroundImagesSeeded = "Background Images seeded";
+
 
         private const string kDefaultConfigPath = "DefaultConfig";
 
         private const int kHttpListenerPort = 40074;
         private const string kProtocolHandlerPrefix = "tiltbrush://remix/";
+        private const string kBuiltInSketchPrefix = "tiltbrush://builtin/";
         private const string kFileMoveFilename = "WhereHaveMyFilesGone.txt";
 
         private const string kFileMoveContents =
@@ -187,10 +192,22 @@ namespace TiltBrush
 
         [SerializeField] GpuIntersector m_GpuIntersector;
 
-        public TiltBrushManifest m_Manifest;
-
-        // Previously Experimental-Mode only
+        [SerializeField] private TiltBrushManifest m_ManifestStandard;
         [SerializeField] private TiltBrushManifest m_ManifestExperimental;
+        [SerializeField] private TiltBrushManifest m_ZapboxManifest;
+        private TiltBrushManifest m_ManifestFull;
+
+        public TiltBrushManifest ManifestFull
+        {
+            get
+            {
+                if (m_ManifestFull == null)
+                {
+                    m_ManifestFull = MergeManifests();
+                }
+                return m_ManifestFull;
+            }
+        }
 
         [SerializeField] private SelectionEffect m_SelectionEffect;
 
@@ -468,7 +485,7 @@ namespace TiltBrush
             Resources.UnloadUnusedAssets();
         }
 
-        static string GetStartupString()
+        public static string GetStartupString()
         {
             string str = $"{App.kAppDisplayName} {Config.m_VersionNumber}";
 
@@ -495,6 +512,11 @@ namespace TiltBrush
 
             // See if this is the first time
             HasPlayedBefore = PlayerPrefs.GetInt(kPlayerPrefHasPlayedBefore, 0) == 1;
+
+#if ZAPBOX_SUPPORTED
+            // TODO:Mikesky - fix zapbox support.
+            HasPlayedBefore = true;
+#endif
 
             // Copy files into Support directory
             CopySupportFiles();
@@ -541,8 +563,6 @@ namespace TiltBrush
             {
                 gameObject.AddComponent<AutoProfiler>();
             }
-
-            m_Manifest = GetMergedManifest(consultUserConfig: true);
 
             m_HttpServer = GetComponentInChildren<HttpServer>();
             if (!Config.IsMobileHardware)
@@ -596,10 +616,11 @@ namespace TiltBrush
             // Use of ControllerConsoleScript must wait until Start()
             ControllerConsoleScript.m_Instance.AddNewLine(GetStartupString());
 
-            if (!VrSdk.IsHmdInitialized())
+            if (!VrSdk.IsHmdInitialized() && !UserConfig.Flags.EnableMonoscopicMode)
             {
-                Debug.Log("VR HMD was not initialized on startup.");
-                StartupError = true;
+                // If XR is disabled or fails to initialize
+                // and we haven't enabled monoscopic mode
+                // then fall back to the 2d View-only mode
                 CreateFailedToDetectVrDialog();
             }
             else
@@ -628,11 +649,18 @@ namespace TiltBrush
 
             foreach (string s in Config.m_SketchFiles)
             {
-                // Assume all relative paths are relative to the Sketches directory.
                 string sketch = s;
-                if (!System.IO.Path.IsPathRooted(sketch))
+                if (s.StartsWith(kBuiltInSketchPrefix))
                 {
-                    sketch = System.IO.Path.Combine(App.UserSketchPath(), sketch);
+                    sketch = s;
+                }
+                else
+                {
+                    // Assume all relative paths are relative to the Sketches directory.
+                    if (!System.IO.Path.IsPathRooted(sketch))
+                    {
+                        sketch = System.IO.Path.Combine(App.UserSketchPath(), sketch);
+                    }
                 }
                 m_RequestedTiltFileQueue.Enqueue(sketch);
                 if (Config.m_SdkMode == SdkMode.Ods || Config.OfflineRender)
@@ -755,15 +783,6 @@ namespace TiltBrush
             ShowControllers = App.UserConfig.Flags.ShowControllers;
 
             SwitchState();
-
-#if USD_SUPPORTED
-            if (Config.IsExperimental && !string.IsNullOrEmpty(Config.m_IntroSketchUsdFilename))
-            {
-                var gobject = ImportUsd.ImportWithAnim(Config.m_IntroSketchUsdFilename);
-
-                gobject.transform.SetParent(App.Scene.transform, false);
-            }
-#endif
 
             if (Config.m_AutoProfile || m_UserConfig.Profiling.AutoProfile)
             {
@@ -928,7 +947,10 @@ namespace TiltBrush
                             {
                                 OnIntroComplete();
                             }
-                            else if (Config.IsExperimental)
+                            else if (!VrSdk.IsHmdInitialized() ||
+                                     UserConfig.Flags.SkipIntro ||
+                                     UserConfig.Flags.DisableXrMode ||
+                                     UserConfig.Flags.EnableMonoscopicMode)
                             {
                                 OnIntroComplete();
                                 PanelManager.m_Instance.ReviveFloatingPanelsForStartup();
@@ -1182,6 +1204,10 @@ namespace TiltBrush
             else if (PanelManager.m_Instance.BrushLabActive())
             {
                 PanelManager.m_Instance.ToggleBrushLabPanels();
+            }
+            else if (PanelManager.m_Instance.MultiplayerActive())
+            {
+                PanelManager.m_Instance.ToggleMultiplayerPanels();
             }
 
             // Hide all panels.
@@ -1469,6 +1495,15 @@ namespace TiltBrush
             if (path.StartsWith(kProtocolHandlerPrefix))
             {
                 return HandlePolyRequest(path);
+            }
+
+            if (path.StartsWith(kBuiltInSketchPrefix))
+            {
+                path = path.Substring(kBuiltInSketchPrefix.Length);
+                path = Path.Join(FeaturedSketchesPath(), path);
+                SketchControlsScript.m_Instance.IssueGlobalCommand(
+                    SketchControlsScript.GlobalCommands.LoadNamedFile, sParam: path);
+                return true;
             }
 
             // Copy to sketch folder in order to discourage the user from explicitly saving
@@ -1766,17 +1801,17 @@ namespace TiltBrush
             }
         }
 
-        public void CreateFailedToDetectVrDialog(string msg = null)
+        public void CreateFailedToDetectVrDialog(string msg = null, bool allowViewing = true)
         {
             GameObject dialog = Instantiate(m_ErrorDialog);
-            var textXf = dialog.transform.Find("Text");
-            var textMesh = textXf.GetComponent<TextMesh>();
-            if (msg == null)
+            var initScript = dialog.GetComponent<InitNoHeadsetMode>();
+            if (!string.IsNullOrEmpty(msg))
             {
-                msg = "Failed to detect VR";
+                var textMesh = initScript.m_Heading;
+                textMesh.text = @$"        Tiltasaurus says...
+                   {msg}";
             }
-            textMesh.text = string.Format(@"        Tiltasaurus says...
-                   {0}", msg);
+            initScript.ShowSketchSelectorUi(allowViewing && !StartupError);
         }
 
         static public bool AppAllowsCreation()
@@ -1879,7 +1914,10 @@ namespace TiltBrush
             if (!Path.IsPathRooted(m_UserPath))
             {
                 StartupError = true;
-                CreateFailedToDetectVrDialog("Failed to find Documents folder.\nIn Windows, try modifying your Controlled Folder Access settings.");
+                CreateFailedToDetectVrDialog(
+                    "Failed to find Documents folder.\nIn Windows, try modifying your Controlled Folder Access settings.",
+                    allowViewing: false
+                );
             }
         }
 
@@ -1961,7 +1999,7 @@ namespace TiltBrush
         {
             string modelsDirectory = ModelLibraryPath();
 
-            // TODO:Mike - Re-enable this check in a few versions,
+            // TODO:Mikesky - Re-enable this check in a few versions,
             // and remove the one in the obj removal loop.
 
             // if (Directory.Exists(modelsDirectory)) { return true; }
@@ -1997,6 +2035,34 @@ namespace TiltBrush
                 {
                     FileUtils.WriteBytesFromResources(fileName, newModel);
                 }
+            }
+            return true;
+        }
+
+        /// Creates the Background Images directory and copies in the provided default images.
+        /// Returns true if the directory already exists or if it is created successfully, false if the
+        /// directory could not be created.
+        public static bool InitBackgroundImagesPath(string[] defaultBackgroundImages)
+        {
+            string path = BackgroundImagesLibraryPath();
+            if (!Directory.Exists(path))
+            {
+                if (!FileUtils.InitializeDirectoryWithUserError(path))
+                {
+                    return false;
+                }
+            }
+
+            // Populate the reference images folder exactly once.
+            int seeded = PlayerPrefs.GetInt(kBackgroundImagesSeeded);
+            if (seeded == 0)
+            {
+                foreach (string fileName in defaultBackgroundImages)
+                {
+                    FileUtils.WriteBytesFromResources(fileName,
+                        Path.Combine(path, Path.GetFileName(fileName.Replace(".bytes", ""))));
+                }
+                PlayerPrefs.SetInt(kBackgroundImagesSeeded, 1);
             }
             return true;
         }
@@ -2074,6 +2140,11 @@ namespace TiltBrush
             return Path.Combine(MediaLibraryPath(), "Videos");
         }
 
+        public static string BackgroundImagesLibraryPath()
+        {
+            return Path.Combine(MediaLibraryPath(), "BackgroundImages");
+        }
+
         static public string UserSketchPath()
         {
             return Path.Combine(UserPath(), "Sketches");
@@ -2144,20 +2215,17 @@ namespace TiltBrush
             }
         }
 
-        public TiltBrushManifest GetMergedManifest(bool consultUserConfig, bool forceExperimental = false)
+        private TiltBrushManifest MergeManifests()
         {
-            var manifest = m_Manifest;
-            if (Config.IsExperimental || forceExperimental)
+#if ZAPBOX_SUPPORTED
+            var manifest = m_ZapboxManifest;
+#else
+            var manifest = Instantiate(m_ManifestStandard);
+            if (m_ManifestExperimental != null)
             {
-                // At build time, we don't want the user config to affect the build output.
-                if ((consultUserConfig
-                    && m_UserConfig.Flags.ShowDangerousBrushes
-                    && m_ManifestExperimental != null) || forceExperimental)
-                {
-                    manifest = Instantiate(m_Manifest);
-                    manifest.AppendFrom(m_ManifestExperimental);
-                }
+                manifest.AppendFrom(m_ManifestExperimental);
             }
+#endif
             return manifest;
         }
 
@@ -2169,7 +2237,7 @@ namespace TiltBrush
 
         DateTime GetLinkerTime(Assembly assembly, TimeZoneInfo target = null)
         {
-#if !UNITY_ANDROID
+#if !(UNITY_ANDROID || UNITY_IOS)
             var filePath = assembly.Location;
             const int c_PeHeaderOffset = 60;
             const int c_LinkerTimestampOffset = 8;

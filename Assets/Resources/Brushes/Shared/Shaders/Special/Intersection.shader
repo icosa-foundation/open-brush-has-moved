@@ -34,6 +34,7 @@ Shader "Brush/Special/Intersection" {
 #pragma fragment frag
 #pragma geometry geom
 
+#include "UnityCG.cginc"
 #include "Assets/Shaders/Include/Brush.cginc"
 #include "Assets/Shaders/Include/PackInt.cginc"
 
@@ -45,6 +46,8 @@ Shader "Brush/Special/Intersection" {
 
       struct appdata_t {
         float4 vertex : POSITION;
+
+        UNITY_VERTEX_INPUT_INSTANCE_ID
       };
 
       struct v2f {
@@ -55,12 +58,18 @@ Shader "Brush/Special/Intersection" {
 #if TILT_ENABLE_CONSERVATIVE_RASTER // Saves some overhead when unused.
         float4 aabb : TEXCOORD1;
         float4 clipPos : TEXCOORD2;
-#endif
+        #endif
+        UNITY_VERTEX_OUTPUT_STEREO
       };
 
       v2f vert(appdata_t v)
       {
         v2f o;
+
+        UNITY_SETUP_INSTANCE_ID(v);
+        UNITY_INITIALIZE_OUTPUT(v2f, o);
+        UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
+
         o.vertex = UnityObjectToClipPos(v.vertex);
         o.worldPos = mul(unity_ObjectToWorld, v.vertex);
         o.color = half4(0, 0, 0, 0);
@@ -164,25 +173,9 @@ Shader "Brush/Special/Intersection" {
       {
         v2f test = (v2f)0;
 
-#if 1
         // This method also handles the case of large triangles.
         // TODO: the 'any' and 'all' functions appear to not work on Android. Have disabled check for now.
         bool hit = SphereInTriangle(input[0].worldPos, input[1].worldPos, input[2].worldPos, vSphereCenter, fSphereRad);
-          //&& any(input[0].worldPos != input[1].worldPos)
-          //&& any(input[0].worldPos != input[2].worldPos)
-          //&& any(input[2].worldPos != input[1].worldPos);
-          
-
-#else
-        // TODO: Remove in M14.
-        // Explicitly not testing for extremely large triangles where the sphere is internal
-        bool hit = any(input[0].worldPos != input[1].worldPos)
-            && any(input[0].worldPos != input[2].worldPos)
-            && any(input[2].worldPos != input[1].worldPos)
-            && (SegmentSphereIntersection(input[0].worldPos, input[1].worldPos, vSphereCenter, fSphereRad)
-             || SegmentSphereIntersection(input[1].worldPos, input[2].worldPos, vSphereCenter, fSphereRad)
-             || SegmentSphereIntersection(input[2].worldPos, input[0].worldPos, vSphereCenter, fSphereRad));
-#endif
 
         // Discard the triangle if there is no hit.
         if (!hit) {

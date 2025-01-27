@@ -20,7 +20,7 @@ using Object = UnityEngine.Object;
 
 namespace TiltBrush
 {
-
+    [System.Serializable]
     public class Stroke : StrokeData
     {
         public enum Type
@@ -163,6 +163,7 @@ namespace TiltBrush
         {
             m_NodeByTime = new LinkedListNode<Stroke>(this);
             m_PlaybackNode = new LinkedListNode<Stroke>(this);
+            m_Guid = Guid.NewGuid();
         }
 
         /// Clones the passed stroke into a new NotCreated stroke.
@@ -185,6 +186,9 @@ namespace TiltBrush
             // And we can't use field initializers for the linked list creation.
             m_NodeByTime = new LinkedListNode<Stroke>(this);
             m_PlaybackNode = new LinkedListNode<Stroke>(this);
+
+            if (existing.m_Guid != null)
+                m_Guid = Guid.NewGuid();
         }
 
         /// Makes a copy of stroke, if one has not already been made.
@@ -250,6 +254,15 @@ namespace TiltBrush
             }
 
             m_Type = Type.NotCreated;
+        }
+
+        /// Like Recreate except the translation are interpreted as a destination point relative to the canvas
+        /// (instead of how much to translate by). Rotation and scale are relative and applied after the translation.
+
+        public void RecreateAt(TrTransform xf_CS)
+        {
+            TrTransform leftTransform = TrTransform.InvMul(TrTransform.T(m_BatchSubset.m_Bounds.center), xf_CS);
+            Recreate(leftTransform);
         }
 
         /// Ensure there is geometry for this stroke, creating if necessary.

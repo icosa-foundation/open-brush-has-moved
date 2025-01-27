@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using UnityEngine;
 using System;
+using UnityEngine;
+using UnityEngine.Localization;
+using UnityEngine.Localization.Settings;
 
 namespace TiltBrush
 {
@@ -40,6 +42,21 @@ namespace TiltBrush
             m_AudioReactiveIconRenderer = m_AudioReactiveIcon.GetComponent<Renderer>();
             m_ExperimentalIconRenderer = m_ExperimentalIcon.GetComponent<Renderer>();
             m_OriginPosition = transform.localPosition;
+        }
+
+        protected override void OnSelectedLocaleChanged(Locale locale)
+        {
+            if (m_Brush != null)
+            {
+                if (Config.IsExperimental)
+                {
+                    SetDescriptionText(m_Brush.Description, m_Brush.m_DescriptionExtra);
+                }
+                else
+                {
+                    SetDescriptionText(m_Brush.Description);
+                }
+            }
         }
 
         override protected void OnDescriptionChanged()
@@ -87,20 +104,17 @@ namespace TiltBrush
 
             if (Config.IsExperimental)
             {
-                SetDescriptionText(rBrush.m_Description, rBrush.m_DescriptionExtra);
+                SetDescriptionText(rBrush.Description, rBrush.m_DescriptionExtra);
             }
             else
             {
-                SetDescriptionText(rBrush.m_Description);
+                SetDescriptionText(rBrush.Description);
             }
             m_AudioReactiveIcon.SetActive(rBrush.m_AudioReactive &&
                 VisualizerManager.m_Instance.VisualsRequested);
             // Play standard click sound if brush doesn't have a custom button sound
             m_ButtonHasPressedAudio = (rBrush.m_ButtonAudio == null);
-            if (App.Config.m_WasExperimentalAtStartup)
-            {
-                m_ExperimentalIcon.SetActive(App.Instance.IsBrushExperimental(rBrush));
-            }
+            m_ExperimentalIcon.SetActive(App.Instance.IsBrushExperimental(rBrush));
         }
 
         override protected void OnDescriptionActivated()

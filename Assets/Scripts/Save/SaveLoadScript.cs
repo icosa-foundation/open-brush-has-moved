@@ -651,6 +651,11 @@ namespace TiltBrush
                             environment, forceTransition: true,
                             keepSceneTransform: true, hasCustomLights: jsonData.Lights != null
                         );
+                        // This will have been overwritten by Set
+                        if (jsonData.Environment != null && jsonData.Environment.Skybox != null)
+                        {
+                            SceneSettings.m_Instance.LoadCustomSkybox(jsonData.Environment.Skybox);
+                        }
                     }
                     else
                     {
@@ -665,7 +670,9 @@ namespace TiltBrush
                     if (jsonData.CanvasTransformInSceneSpace != TrTransform.identity)
                     {
                         Debug.LogWarning("This file has an unsupported, experimental Canvas Transform specified.");
-                        if (Config.IsExperimental)
+                        // Was experimental mode. Needs testing.
+                        // Saves sketches are unlikely to trigger this under normal usage
+                        if (false)
                         {
                             Coords.CanvasLocalPose = jsonData.CanvasTransformInSceneSpace;
                         }
@@ -712,7 +719,7 @@ namespace TiltBrush
                 }
 
 
-                // It's proving to be rather complex to merge widgets/models etc. 
+                // It's proving to be rather complex to merge widgets/models etc.
                 // For now skip all that when loading additively with the if (!bAdditive) below
                 // This should cover the majority of use cases.
 
@@ -731,6 +738,16 @@ namespace TiltBrush
                         WidgetManager.m_Instance.SetDataFromTilt(jsonData.ModelIndex);
                     }
 
+                    if (jsonData.ModelIndex != null)
+                    {
+                        WidgetManager.m_Instance.SetDataFromTilt(jsonData.ModelIndex);
+                    }
+
+                    if (jsonData.LightIndex != null)
+                    {
+                        WidgetManager.m_Instance.SetDataFromTilt(jsonData.LightIndex);
+                    }
+
                     if (jsonData.GuideIndex != null)
                     {
                         foreach (Guides guides in jsonData.GuideIndex)
@@ -745,6 +762,7 @@ namespace TiltBrush
                     // Pass even if null; null is treated as empty
                     CustomColorPaletteStorage.m_Instance.SetColorsFromPalette(jsonData.Palette);
                     // Images are not stored on Poly either.
+                    // TODO - will this assumption still hold with Icosa?
                     if (!(fileInfo is PolySceneFileInfo))
                     {
                         if (ReferenceImageCatalog.m_Instance != null && jsonData.ImageIndex != null)
@@ -787,7 +805,10 @@ namespace TiltBrush
         {
             m_LastJsonMetadatError = null;
             var metadata = m_JsonSerializer.Deserialize<SketchMetadata>(jsonReader);
-            MetadataUtils.VerifyMetadataVersion(metadata);
+            if (metadata != null)
+            {
+                MetadataUtils.VerifyMetadataVersion(metadata);
+            }
             return metadata;
         }
 
@@ -999,6 +1020,71 @@ namespace TiltBrush
                     m_CaptureHiResSaveIcon ? m_SaveIconHiResRenderTexture : null,
                     m_CaptureGifSaveIcon ? m_SaveGifRenderTextures : null));
             return snapshot;
+        }
+
+        public IEnumerator GetLastAutosaveBytes(Action<byte[]> onComplete)
+        {
+
+            while (m_AutosaveCoroutine != null) yield return null;
+
+            // Retrieve the autosaved file
+            string autosaveFile = MostRecentAutosaveFile();
+            if (!string.IsNullOrEmpty(autosaveFile) && File.Exists(autosaveFile))
+            {
+                try
+                {
+                    byte[] fileBytes = File.ReadAllBytes(autosaveFile);
+                    Debug.Log($"Autosave complete. Loaded {fileBytes.Length} bytes from {autosaveFile}");
+                    onComplete?.Invoke(fileBytes);
+                }
+                catch (IOException ex)
+                {
+                    Debug.LogError($"Failed to read autosave file: {ex.Message}");
+                    onComplete?.Invoke(null);
+                }
+            }
+            else
+            {
+                Debug.LogWarning("Autosave file not found or doesn't exist.");
+                onComplete?.Invoke(null);
+            }
+        }
+
+        public void LoadFromBytes(byte[] data)
+        {
+            if (data == null || data.Length == 0)
+            {
+                Debug.LogError("LoadFromBytes: Data is null or empty.");
+                return;
+            }
+
+            try
+            {
+                // Write the byte array to a temporary file
+                string tempFilePath = Path.Combine(Application.temporaryCachePath, "temp_autosave.tilt");
+                File.WriteAllBytes(tempFilePath, data);
+
+                // Load the temporary file into the scene
+                var fileInfo = new DiskSceneFileInfo(tempFilePath);
+                if (Load(fileInfo))
+                {
+                    Debug.Log("LoadFromBytes: Scene successfully loaded from bytes.");
+                }
+                else
+                {
+                    Debug.LogError("LoadFromBytes: Failed to load scene.");
+                }
+
+                // Clean up the temporary file
+                if (File.Exists(tempFilePath))
+                {
+                    File.Delete(tempFilePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"LoadFromBytes: Error while loading scene from bytes. Exception: {ex.Message}");
+            }
         }
     }
 

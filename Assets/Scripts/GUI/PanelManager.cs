@@ -24,10 +24,8 @@ namespace TiltBrush
     {
         public GameObject m_PanelPrefab;
         public bool m_ModeVr;
-        public bool m_ModeVrExperimental;
         public bool m_ModeMono;
         public bool m_ModeQuest;
-        public bool m_ModeGvr;
         public bool m_Basic;
         public bool m_Advanced;
 
@@ -35,26 +33,17 @@ namespace TiltBrush
         {
             switch (mode)
             {
-                case SdkMode.UnityXR:
-                    if (Config.IsExperimental)
-                    {
-                        return m_ModeVrExperimental;
-                    }
-                    if (App.Config.IsMobileHardware)
-                    {
-                        return m_ModeQuest;
-                    }
+                case SdkMode.UnityXR when App.Config.IsMobileHardware:
+                    return m_ModeQuest;
+                case SdkMode.UnityXR when !App.Config.IsMobileHardware:
                     return m_ModeVr;
                 case SdkMode.Monoscopic:
                     return m_ModeMono;
+                case SdkMode.Ods when App.VrSdk.GetControllerDof() != VrSdk.DoF.None:
+                    return m_ModeMono;
                 default:
-                    if (App.VrSdk.GetControllerDof() != VrSdk.DoF.None)
-                    {
-                        return m_ModeMono;
-                    }
-                    break;
+                    return false;
             }
-            return false;
         }
     }
 
@@ -69,8 +58,6 @@ namespace TiltBrush
         static public PanelManager m_Instance;
 
         public const string kPlayerPrefAdvancedMode = "AdvancedMode";
-
-        [SerializeField] protected GameObject m_UxExplorationPrefab;
 
         [SerializeField] protected PanelMapKey[] m_PanelMap;
 
@@ -175,6 +162,9 @@ namespace TiltBrush
 
             // StandardToMemoryWarning - Transition to Memory Warning can come from any state.
             MemoryWarningToStandard,
+            Multiplayer,
+            StandardToMultiplayer,
+            MultiplayerToStandard
         }
 
         public enum PaneVisualsState
@@ -238,6 +228,7 @@ namespace TiltBrush
         private List<BasePanel> m_MemoryWarningPanels;
         private List<BasePanel> m_CameraPanels;
         private List<BasePanel> m_BrushLabPanels;
+        private List<BasePanel> m_MultiplayerPanels;
         private BasePanel m_AdminPanel;
 
         private AdvancedPanelLayouts m_CachedPanelLayouts;
@@ -265,6 +256,7 @@ namespace TiltBrush
         private float m_MemoryWarningScale;
         private float m_CameraScale;
         private float m_BrushLabScale;
+        private float m_MultiplayerScale;
 
         private PanelsState m_PanelsState;
         private PanelMode m_PanelsMode;
@@ -304,7 +296,7 @@ namespace TiltBrush
         public bool PanelsAreStable()
         {
             return StandardActive() || SketchbookActive() || SettingsActive() || MemoryWarningActive() ||
-                CameraActive() || BrushLabActive();
+                CameraActive() || BrushLabActive() || MultiplayerActive();
         }
         public bool StandardActive() { return m_PanelsMode == PanelMode.Standard; }
         public bool SketchbookActive() { return m_PanelsMode == PanelMode.Sketchbook; }
@@ -312,6 +304,7 @@ namespace TiltBrush
         public bool CameraActive() { return m_PanelsMode == PanelMode.Camera; }
         public bool MemoryWarningActive() { return m_PanelsMode == PanelMode.MemoryWarning; }
         public bool BrushLabActive() { return m_PanelsMode == PanelMode.BrushLab; }
+        public bool MultiplayerActive() { return m_PanelsMode == PanelMode.Multiplayer; }
         public bool PanelsHaveBeenCustomized() { return m_PanelsCustomized; }
         public bool AdvancedModeActive() { return m_AdvancedPanels; }
         public bool SketchbookActiveIncludingTransitions()
@@ -372,7 +365,8 @@ namespace TiltBrush
             return IsAdminPanel(type) ||
                 type == BasePanel.PanelType.AppSettings || type == BasePanel.PanelType.AppSettingsMobile ||
                 type == BasePanel.PanelType.Sketchbook || type == BasePanel.PanelType.SketchbookMobile ||
-                type == BasePanel.PanelType.Camera || type == BasePanel.PanelType.MemoryWarning;
+                type == BasePanel.PanelType.Camera || type == BasePanel.PanelType.MemoryWarning ||
+                type == BasePanel.PanelType.Multiplayer;
         }
 
         // Core panels are those that exist in the basic mode experience.  Practically, those that
@@ -399,6 +393,7 @@ namespace TiltBrush
             m_MemoryWarningPanels = new List<BasePanel>();
             m_CameraPanels = new List<BasePanel>();
             m_BrushLabPanels = new List<BasePanel>();
+            m_MultiplayerPanels = new List<BasePanel>();
 
             m_RevealParticleParent = new GameObject("ParticlesParent");
             m_RevealParticleParent.transform.parent = transform;
@@ -474,15 +469,6 @@ namespace TiltBrush
 
             m_PanelsCustomized = false;
             m_AdvancedModeRevealActive = false;
-
-            if (Config.IsExperimental)
-            {
-                // If we've got a UX exploration prefab, instantiate it here.
-                if (m_UxExplorationPrefab != null)
-                {
-                    m_UxExploration = Instantiate(m_UxExplorationPrefab);
-                }
-            }
 
             TintWandPaneVisuals(true);
 
@@ -571,6 +557,10 @@ namespace TiltBrush
                 else if (p.Type == BasePanel.PanelType.BrushLab)
                 {
                     m_BrushLabPanels.Add(p);
+                }
+                else if (p.Type == BasePanel.PanelType.Multiplayer)
+                {
+                    m_MultiplayerPanels.Add(p);
                 }
                 else if (IsAdminPanel(p.Type))
                 {
@@ -895,7 +885,8 @@ namespace TiltBrush
                 (m_PanelsMode == PanelMode.Sketchbook ||
                 m_PanelsMode == PanelMode.Settings ||
                 m_PanelsMode == PanelMode.MemoryWarning ||
-                m_PanelsMode == PanelMode.Camera);
+                m_PanelsMode == PanelMode.Camera ||
+                m_PanelsMode == PanelMode.Multiplayer);
             if (inVisibleAltMode && App.VrSdk.AnalogIsStick(InputManager.ControllerName.Wand))
             {
                 if (m_AltModeSwipeEatStickInput)
@@ -937,6 +928,10 @@ namespace TiltBrush
                             else if (m_PanelsMode == PanelMode.Camera)
                             {
                                 ToggleCameraPanels();
+                            }
+                            else if (m_PanelsMode == PanelMode.Multiplayer)
+                            {
+                                ToggleMultiplayerPanels();
                             }
                         }
                     }
@@ -1105,15 +1100,6 @@ namespace TiltBrush
 
         public void UpdatePanels()
         {
-            if (Config.IsExperimental)
-            {
-                if (m_UxExploration != null)
-                {
-                    LockUxExplorationToController();
-                    return;
-                }
-            }
-
             UnityEngine.Profiling.Profiler.BeginSample("PanelManager.UpdatePanels");
             // Lock panels to the controller if we've got 6dof controls.
             if (SketchControlsScript.m_Instance.ActiveControlsType ==
@@ -1193,7 +1179,8 @@ namespace TiltBrush
             if (m_PanelsMode == PanelMode.Sketchbook ||
                 m_PanelsMode == PanelMode.Settings ||
                 m_PanelsMode == PanelMode.MemoryWarning ||
-                m_PanelsMode == PanelMode.Camera)
+                m_PanelsMode == PanelMode.Camera ||
+                m_PanelsMode == PanelMode.Multiplayer)
             {
                 return;
             }
@@ -1672,16 +1659,6 @@ namespace TiltBrush
             }
         }
 
-        public void LockUxExplorationToController()
-        {
-            if (Config.IsExperimental)
-            {
-                Transform baseTransform = InputManager.Wand.Geometry.MainAxisAttachPoint;
-                m_UxExploration.transform.position = baseTransform.position;
-                m_UxExploration.transform.rotation = baseTransform.rotation;
-            }
-        }
-
         public void LockPanelsToController()
         {
             Transform rBaseTransform = InputManager.Wand.Geometry.MainAxisAttachPoint;
@@ -1730,6 +1707,11 @@ namespace TiltBrush
                 for (int i = 0; i < m_BrushLabPanels.Count; ++i)
                 {
                     SetAltPanelXfFromWand(m_BrushLabPanels[i], rBaseTransform);
+                }
+
+                for (int i = 0; i < m_MultiplayerPanels.Count; ++i)
+                {
+                    SetAltPanelXfFromWand(m_MultiplayerPanels[i], rBaseTransform);
                 }
             }
 
@@ -1844,7 +1826,10 @@ namespace TiltBrush
                     {
                         m_BrushLabPanels[i].ResetPanel();
                     }
-
+                    for (int i = 0; i < m_MultiplayerPanels.Count; ++i)
+                    {
+                        m_MultiplayerPanels[i].ResetPanel();
+                    }
                     m_PanelsState = PanelsState.Exiting;
                 }
             }
@@ -1910,6 +1895,12 @@ namespace TiltBrush
             }
         }
 
+        public void ToggleMultiplayerPanels()
+        {
+            ToggleMode(m_MultiplayerPanels, PanelMode.Multiplayer, PanelMode.StandardToMultiplayer,
+                PanelMode.MultiplayerToStandard);
+        }
+
         // This function toggles between the 'mode' parameter and PanelMode.Standard.  Currently,
         // transitions from a non-Standard mode to another non-Standard mode are not allowed.
         // toMode and fromMode define the transition modes to mode.
@@ -1922,7 +1913,8 @@ namespace TiltBrush
                     m_PanelsMode == PanelMode.SketchbookToStandard ||
                     m_PanelsMode == PanelMode.SettingsToStandard ||
                     m_PanelsMode == PanelMode.CameraToStandard ||
-                    m_PanelsMode == PanelMode.BrushLabToStandard)
+                    m_PanelsMode == PanelMode.BrushLabToStandard ||
+                    m_PanelsMode == PanelMode.MultiplayerToStandard)
                 {
                     // If we're in full standard mode, reset the panels before we shrink 'em down.
                     if (m_PanelsMode == PanelMode.Standard)
@@ -1989,6 +1981,7 @@ namespace TiltBrush
             m_StandardScale = 0.0f;
             m_BrushLabScale = 0.0f;
             m_MemoryWarningScale = 0.0f;
+            m_MultiplayerScale = 0.0f;
 
             switch (mode)
             {
@@ -2009,6 +2002,9 @@ namespace TiltBrush
                     break;
                 case PanelMode.BrushLab:
                     m_BrushLabScale = 1.0f;
+                    break;
+                case PanelMode.Multiplayer:
+                    m_MultiplayerScale = 1.0f;
                     break;
                 default:
                     Debug.LogError("PanelManager.ForceModeScale() called with unsupported mode.");
@@ -2048,6 +2044,7 @@ namespace TiltBrush
             SetPanelListScaleAndActive(m_MemoryWarningPanels, m_MemoryWarningScale);
             SetPanelListScaleAndActive(m_CameraPanels, m_CameraScale);
             SetPanelListScaleAndActive(m_BrushLabPanels, m_BrushLabScale);
+            SetPanelListScaleAndActive(m_MultiplayerPanels, m_MultiplayerScale);
         }
 
         void SetPanelListScaleAndActive(List<BasePanel> panels, float scale)
@@ -2071,6 +2068,7 @@ namespace TiltBrush
                 case PanelMode.Settings: break;
                 case PanelMode.MemoryWarning: break;
                 case PanelMode.BrushLab: break;
+                case PanelMode.Multiplayer: break;
                 case PanelMode.StandardToSketchbook:
                     AnimateScaleToMode(ref m_StandardScale, ref m_SketchbookScale, PanelMode.Sketchbook);
                     break;
@@ -2091,6 +2089,12 @@ namespace TiltBrush
                     break;
                 case PanelMode.StandardToBrushLab:
                     AnimateScaleToMode(ref m_StandardScale, ref m_BrushLabScale, PanelMode.BrushLab);
+                    break;
+                case PanelMode.StandardToMultiplayer:
+                    AnimateScaleToMode(ref m_StandardScale, ref m_MultiplayerScale, PanelMode.Multiplayer);
+                    break;
+                case PanelMode.MultiplayerToStandard:
+                    AnimateScaleToMode(ref m_MultiplayerScale, ref m_StandardScale, PanelMode.Standard);
                     break;
                 case PanelMode.BrushLabToStandard:
                     AnimateScaleToMode(ref m_BrushLabScale, ref m_StandardScale, PanelMode.Standard);
@@ -2366,8 +2370,9 @@ namespace TiltBrush
 
         public void OpenPanel(BasePanel.PanelType type, TrTransform trSpawnXf)
         {
-            if (type != BasePanel.PanelType.SketchSurface && type != BasePanel.PanelType.Color &&
-                type != BasePanel.PanelType.Brush)
+            if ((type != BasePanel.PanelType.SketchSurface
+                && type != BasePanel.PanelType.Color
+                && type != BasePanel.PanelType.Brush))
             {
                 TrTransform xfSpawn = trSpawnXf;
                 xfSpawn.scale = 0.0f;

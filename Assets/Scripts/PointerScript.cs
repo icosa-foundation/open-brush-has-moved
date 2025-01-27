@@ -58,7 +58,7 @@ namespace TiltBrush
         [SerializeField] private bool m_PreviewLineEnabled;
         [SerializeField] private float m_PreviewLineControlPointLife = 1.0f;
         [SerializeField] private float m_PreviewLineIdealLength = 1.0f;
-        [SerializeField] private GvrAudioSource[] m_AudioSources;
+        [SerializeField] private AudioSource[] m_AudioSources;
         [SerializeField] private Vector2 m_BrushAudioPitchVelocityRange;
         [SerializeField] private AudioClip m_BrushPlaybackAudioClip;
 
@@ -659,7 +659,7 @@ namespace TiltBrush
                     xf_LS,
                     m_CurrentBrush, m_CurrentColor, m_CurrentBrushSize);
 
-                line.gameObject.name = string.Format("Preview {0}", m_CurrentBrush.m_Description);
+                line.gameObject.name = string.Format("Preview {0}", m_CurrentBrush.Description);
                 line.SetPreviewMode();
 
                 m_PreviewLine = line;
@@ -933,7 +933,8 @@ namespace TiltBrush
         public void DetachLine(
             bool bDiscard,
             Stroke rMemoryObjectForPlayback,
-            SketchMemoryScript.StrokeFlags strokeFlags = SketchMemoryScript.StrokeFlags.None)
+            SketchMemoryScript.StrokeFlags strokeFlags = SketchMemoryScript.StrokeFlags.None,
+            bool isFinalStroke = false)
         {
 
             if (rMemoryObjectForPlayback != null)
@@ -1001,7 +1002,11 @@ namespace TiltBrush
                         m_CurrentBrushSize,
                         m_CurrentLine.StrokeScale,
                         m_ControlPoints, strokeFlags,
-                        WidgetManager.m_Instance.ActiveStencil, m_LineLength_CS, m_CurrentLine.RandomSeed);
+                        WidgetManager.m_Instance.ActiveStencil,
+                        m_LineLength_CS,
+                        m_CurrentLine.RandomSeed,
+                        isFinalStroke
+                        );
                 }
                 else
                 {

@@ -19,11 +19,13 @@ Shader "Custom/ReferenceImage" {
         _Aspect("Aspect Ratio", Float) = 1
         _Cutoff("Alpha cutoff", Range(0,1)) = 0.5
         _Grayscale("Grayscale", Float) = 0
+		[Enum(UnityEngine.Rendering.CullMode)] _CullMode ("CullMode", Int) = 2
     }
     SubShader {
         Tags{ "Queue" = "AlphaTest+20" "IgnoreProjector" = "True" "RenderType" = "TransparentCutout" }
         Pass {
             Lighting Off
+            Cull [_CullMode]
 
             CGPROGRAM
             #pragma vertex vert
@@ -45,14 +47,23 @@ Shader "Custom/ReferenceImage" {
             struct appdata {
                 float4 vertex : POSITION;
                 float2 uv : TEXCOORD0;
+
+                UNITY_VERTEX_INPUT_INSTANCE_ID
             };
 
             struct v2f {
                 float2 uv : TEXCOORD0;
                 float4 vertex : SV_POSITION;
+
+                UNITY_VERTEX_OUTPUT_STEREO
             };
 
             v2f vert (appdata v) {
+                v2f o;
+
+                UNITY_SETUP_INSTANCE_ID(v);
+                UNITY_INITIALIZE_OUTPUT(v2f, o);
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
 
                 v.uv -= 0.5;
 
@@ -68,7 +79,6 @@ Shader "Custom/ReferenceImage" {
 
                 v.uv += 0.5;
 
-                v2f o;
                 o.vertex = UnityObjectToClipPos(v.vertex);
                 o.uv = TRANSFORM_TEX(v.uv, _MainTex);
                 return o;

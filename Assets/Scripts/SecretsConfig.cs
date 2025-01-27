@@ -25,7 +25,9 @@ public class SecretsConfig : ScriptableObject
         Sketchfab = 1,
         Oculus = 2,
         OculusMobile = 3,
-        Pimax = 4
+        Pimax = 4,
+        PhotonFusion = 5,
+        PhotonVoice = 6,
     }
 
     [Serializable]
